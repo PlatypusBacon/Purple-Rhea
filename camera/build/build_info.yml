@@ -1,0 +1,54 @@
+cmake:
+  application:
+    configuration-dir: '/home/bergm/csse4011/firmware/Purple-Rhea/camera'
+    source-dir: '/home/bergm/csse4011/firmware/Purple-Rhea/camera'
+  board:
+    name: 'xiao_ble'
+    path:
+     - '/home/bergm/csse4011/zephyr/boards/seeed/xiao_ble'
+    qualifiers: 'nrf52840/sense'
+    revision: ''
+  devicetree:
+    bindings-dirs:
+     - '/home/bergm/csse4011/firmware/dts/bindings'
+     - '/home/bergm/csse4011/zephyr/dts/bindings'
+    files:
+     - '/home/bergm/csse4011/zephyr/boards/seeed/xiao_ble/xiao_ble_nrf52840_sense.dts'
+    include-dirs:
+     - '/home/bergm/csse4011/firmware/include'
+     - '/home/bergm/csse4011/firmware/dts'
+     - '/home/bergm/csse4011/modules/hal/stm32/dts'
+     - '/home/bergm/csse4011/zephyr/include'
+     - '/home/bergm/csse4011/zephyr/include/zephyr'
+     - '/home/bergm/csse4011/zephyr/dts/common'
+     - '/home/bergm/csse4011/zephyr/dts/vendor'
+     - '/home/bergm/csse4011/zephyr/dts/rx'
+     - '/home/bergm/csse4011/zephyr/dts/x86'
+     - '/home/bergm/csse4011/zephyr/dts/xtensa'
+     - '/home/bergm/csse4011/zephyr/dts/sparc'
+     - '/home/bergm/csse4011/zephyr/dts/riscv'
+     - '/home/bergm/csse4011/zephyr/dts/posix'
+     - '/home/bergm/csse4011/zephyr/dts/arm64'
+     - '/home/bergm/csse4011/zephyr/dts/arm'
+     - '/home/bergm/csse4011/zephyr/dts/arc'
+     - '/home/bergm/csse4011/zephyr/dts'
+  kconfig:
+    files:
+     - '/home/bergm/csse4011/zephyr/boards/seeed/xiao_ble/xiao_ble_nrf52840_sense_defconfig'
+     - '/home/bergm/csse4011/firmware/Purple-Rhea/camera/prj.conf'
+    user-files:
+     - '/home/bergm/csse4011/firmware/Purple-Rhea/camera/prj.conf'
+  toolchain:
+    name: 'zephyr'
+    path: '/home/bergm/zephyr-sdk-0.17.4'
+  vendor-specific:
+    nordic:
+      svdfile: '/home/bergm/csse4011/modules/hal/nordic/nrfx/mdk/nrf52840.svd'
+  zephyr:
+    version: '4.3.0'
+    zephyr-base: '/home/bergm/csse4011/zephyr'
+version: '0.1.0'
+west:
+  command: '/home/bergm/csse4011/.venv/bin/west build -p -b xiao_ble/nrf52840/sense -d ./build .'
+  topdir: '/home/bergm/csse4011'
+  version: '1.5.0'
