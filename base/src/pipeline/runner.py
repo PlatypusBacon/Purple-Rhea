@@ -6,7 +6,7 @@ Each step will be fleshed out in its own module.
 from storage.scan_session import ScanSession
 import os
 import config
-
+import numpy as np
 
 def run(session: ScanSession) -> str:
     """
@@ -63,11 +63,23 @@ def run(session: ScanSession) -> str:
     points_3d = filter_points(points_3d, projections, keypoints_per_frame)
     print(f"[7/7] Filtered to {len(points_3d)} points")
 
+        
+    # Define this before the export block
+    obj_path = os.path.join(config.OUTPUT_DIR, "reconstruction.obj")
+
     # Export
     from pipeline.export import write_obj
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-    obj_path = os.path.join(config.OUTPUT_DIR, "reconstruction.obj")
     write_obj(points_3d, obj_path)
-    print(f"\n✓ Exported {obj_path}")
+
+    # Save projections for visualiser
+    proj_path = os.path.join(config.OUTPUT_DIR, "projections.npy")
+    np.save(proj_path, np.array(projections))
+
+    # Surface reconstruction
+    if config.RUN_SURFACE_RECON:
+        from pipeline.surface import reconstruct_surface
+        mesh_path = reconstruct_surface(points_3d, obj_path)
+        print(f"  Mesh: {mesh_path}")
 
     return obj_path

@@ -23,27 +23,28 @@ import numpy as np
 REPROJECTION_THRESHOLD_PX = 8.0
 
 # Statistical filter: remove points beyond this many std-devs from centroid
-STATISTICAL_STD_MULTIPLIER = 3.0
+STATISTICAL_STD_MULTIPLIER = 2.0 #lower is tighter
 
 
 def filter_points(
     points_3d: np.ndarray,
     projections: list[np.ndarray],
-    keypoints_per_frame,          # reserved for future per-track filtering
+    keypoints_per_frame,
 ) -> np.ndarray:
-    """
-    Two-pass outlier removal.  Returns the filtered (M, 3) point cloud.
-    """
     if len(points_3d) == 0:
         return points_3d
 
+    # Pass 1: depth filter
     before = len(points_3d)
+    #points_3d = _depth_filter(points_3d, projections)
+    #print(f"    depth filter:        {before} -> {len(points_3d)} points")
 
-    # Pass 1: reprojection error across all cameras
-    #points_3d = _reprojection_filter(points_3d, projections)
-    #print(f"    reprojection filter: {before} -> {len(points_3d)} points") #not working rn
+    # Pass 2: orbital bounds filter — remove points outside the camera circle
+    before = len(points_3d)
+    points_3d = _orbital_bounds_filter(points_3d)
+    print(f"    orbital bounds filter: {before} -> {len(points_3d)} points")
 
-    # Pass 2: statistical outlier removal
+    # Pass 3: statistical outlier removal
     before = len(points_3d)
     points_3d = _statistical_filter(points_3d)
     print(f"    statistical filter:  {before} -> {len(points_3d)} points")
@@ -110,3 +111,41 @@ def _statistical_filter(points_3d: np.ndarray) -> np.ndarray:
     dists = np.linalg.norm(points_3d - centroid, axis=1)
     threshold = dists.mean() + STATISTICAL_STD_MULTIPLIER * dists.std()
     return points_3d[dists < threshold]
+
+def _orbital_bounds_filter(points_3d: np.ndarray) -> np.ndarray:
+    centroid = points_3d.mean(axis=0)
+    centred = points_3d - centroid
+
+    # PCA to find orbital plane
+    _, _, Vt = np.linalg.svd(centred, full_matrices=False)
+    coords_2d = centred @ Vt[:2].T
+    radial_dist = np.linalg.norm(coords_2d, axis=1)
+
+    # Use data-inferred radius only — SfM scale is arbitrary,
+    # NOMINAL_RADIUS in metres is meaningless here
+    inferred_radius = np.percentile(radial_dist, 90)
+    MARGIN = 0.75   # keep inner 75% — cuts background, keeps object
+    cutoff = inferred_radius * MARGIN
+
+    print(f"      inferred radius: {inferred_radius:.4f}  cutoff: {cutoff:.4f}  "
+          f"({(radial_dist < cutoff).sum()} / {len(points_3d)} kept)")
+    return points_3d[radial_dist < cutoff]
+
+def _depth_filter(
+    points_3d: np.ndarray,
+    projections: list[np.ndarray],
+) -> np.ndarray:
+    """
+    Discard any point that projects behind any camera (depth <= 0).
+    These are degenerate triangulations from near-parallel viewing rays.
+    """
+    N = len(points_3d)
+    X_h = np.hstack([points_3d, np.ones((N, 1))])  # (N, 4)
+    keep = np.ones(N, dtype=bool)
+
+    for P in projections:
+        proj = (P @ X_h.T).T        # (N, 3)
+        depths = proj[:, 2]
+        keep &= (depths > 0)
+
+    return points_3d[keep]

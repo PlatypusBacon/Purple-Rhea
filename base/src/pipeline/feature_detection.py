@@ -6,7 +6,7 @@ Uses OpenCV's SIFT which implements the DoG pyramid described in the wiki:
   - Subtract adjacent octave layers -> DoG
   - Find maxima/minima across scale and space -> keypoints
 
-Input:  list of BGR images (np.ndarray, shape H×W×3)
+Input:  list of BGR images (np.ndarray, shape HxWx3)
 Output: list of lists of cv2.KeyPoint  (one list per frame)
 """
 
@@ -15,20 +15,34 @@ import numpy as np
 
 
 def detect_all(images: list[np.ndarray]) -> list[list[cv2.KeyPoint]]:
-    """
-    Run DoG keypoint detection on every frame.
-    Returns keypoints_per_frame[i] = list of KeyPoint for images[i].
-    """
     detector = _build_detector()
     keypoints_per_frame = []
 
     for i, img in enumerate(images):
         gray = _to_gray(img)
-        kps = detector.detect(gray, None)
+        
+        # Mask: keep only the central 70% of the image where the object lives.
+        # Discards wall/desk background at the edges.
+        mask = _centre_mask(gray)
+        
+        kps = detector.detect(gray, mask)
         keypoints_per_frame.append(kps)
         print(f"    frame {i:02d}: {len(kps)} keypoints")
 
     return keypoints_per_frame
+
+
+def _centre_mask(gray: np.ndarray) -> np.ndarray:
+    """
+    Elliptical mask centred on the image, covering the middle 70%.
+    Adjust x_frac/y_frac if the object sits lower/higher in frame.
+    """
+    h, w = gray.shape
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cx, cy = w // 2, int(h * 0.45)   # slightly above centre — object tends to sit here
+    axes = (int(w * 0.40), int(h * 0.38))
+    cv2.ellipse(mask, (cx, cy), axes, 0, 0, 360, 255, -1)
+    return mask
 
 
 # --------------------------------------------------------------------------- #
