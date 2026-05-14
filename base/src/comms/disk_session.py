@@ -11,9 +11,7 @@ def start_disk_session() -> ScanSession:
 
         buf = np.frombuffer(open(path, "rb").read(), dtype=np.uint8)
         img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-
-        if config.IMAGE_SCALE != 1.0:
-            img = cv2.resize(img, (config.IMAGE_WIDTH, config.IMAGE_HEIGHT))
+        img = cv2.resize(img, (config.IMAGE_WIDTH, config.IMAGE_HEIGHT))
 
         _, enc = cv2.imencode(".jpg", img)
 
