@@ -50,17 +50,17 @@ def _centre_mask(gray: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 
 def _build_detector() -> cv2.SIFT:
-    """
-    SIFT detector — parameters tuned for small-object orbital scans.
-
-    nfeatures     : soft cap; more keypoints = denser point cloud
-    nOctaveLayers : layers per octave in the Gaussian pyramid (default 3)
-    contrastThreshold : raise to discard low-contrast keypoints (noise)
-    edgeThreshold : raise to keep more edge responses
-    sigma         : initial blur applied before pyramid construction
-    """
+    import config
+    if getattr(config, "LIMIT_MEM", False):
+        return cv2.SIFT_create(
+            nfeatures=500,         # hard cap per frame — was unlimited
+            nOctaveLayers=3,
+            contrastThreshold=0.06,  # stricter — fewer weaker keypoints
+            edgeThreshold=10,
+            sigma=1.6,
+        )
     return cv2.SIFT_create(
-        nfeatures=0,           # 0 = unlimited
+        nfeatures=0,
         nOctaveLayers=3,
         contrastThreshold=0.04,
         edgeThreshold=10,

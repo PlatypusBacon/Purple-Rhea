@@ -14,8 +14,9 @@ SURFACE_METHOD    = "ball_pivot"   # "ball_pivot" or "poisson"
 #   FRAMESIZE_QVGA  ->  320 x 240  (current firmware default)
 #   FRAMESIZE_SVGA  ->  800 x 600  (recommended for reconstruction)
 #   FRAMESIZE_XGA   -> 1024 x 768
-IMAGE_WIDTH  = 3024
-IMAGE_HEIGHT = 4032
+IMAGE_WIDTH  = 756
+IMAGE_HEIGHT = 1008
+LIMIT_MEM=True
 
 MQTT_BROKER    = "localhost"
 MQTT_PORT      = 1883

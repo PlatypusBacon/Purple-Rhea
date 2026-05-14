@@ -1,23 +1,27 @@
-import time
-from storage.scan_session import ScanSession, ScanFrame, CameraPose
+import cv2
+import numpy as np
 import config
+from storage.scan_session import ScanSession, ScanFrame, CameraPose
 
 def start_disk_session() -> ScanSession:
-    """
-    For testing on the bench without the ESP32-CAM.  Loads all JPEGs from disk
-    and synthesises poses from config values.
-    """
     session = ScanSession()
-
     for i in range(config.TOTAL_FRAMES):
         angle_deg = i * config.STEP_DEGREES
-        filename = f"../input/img_{i:02d}.jpg"
-        path = f"{filename}"
-        with open(path, "rb") as f:
-            image_bytes = f.read()
+        path = f"../input/img_{i:02d}.jpg"
 
-        pose = CameraPose.bedug_data(servo_angle_deg=angle_deg, radius=config.NOMINAL_RADIUS)
-        frame = ScanFrame(index=i, image_bytes=image_bytes, pose=pose)
-        session.add_frame(frame)
+        buf = np.frombuffer(open(path, "rb").read(), dtype=np.uint8)
+        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+        if config.IMAGE_SCALE != 1.0:
+            img = cv2.resize(img, (config.IMAGE_WIDTH, config.IMAGE_HEIGHT))
+
+        _, enc = cv2.imencode(".jpg", img)
+
+        pose = CameraPose.bedug_data(
+            servo_angle_deg=angle_deg,
+            radius=config.NOMINAL_RADIUS,
+        )
+        session.add_frame(ScanFrame(index=i, image_bytes=enc.tobytes(), pose=pose))
+        del img, enc, buf
 
     return session
