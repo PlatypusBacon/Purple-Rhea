@@ -1,9 +1,27 @@
 #include <Arduino.h>
 #include "esp_camera.h"
-#include "board_config.h"
+
+// AI Thinker ESP32-CAM pin map
+#define PWDN_GPIO_NUM     32
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM      0
+#define SIOD_GPIO_NUM     26
+#define SIOC_GPIO_NUM     27
+#define Y9_GPIO_NUM       35
+#define Y8_GPIO_NUM       34
+#define Y7_GPIO_NUM       39
+#define Y6_GPIO_NUM       36
+#define Y5_GPIO_NUM       21
+#define Y4_GPIO_NUM       19
+#define Y3_GPIO_NUM       18
+#define Y2_GPIO_NUM        5
+#define VSYNC_GPIO_NUM    25
+#define HREF_GPIO_NUM     23
+#define PCLK_GPIO_NUM     22
 
 #define SERIAL_BAUD     115200
 #define TRIGGER_COMMAND "capture"
+#define FLASH_LED_PIN   4   // AI Thinker ESP32-CAM onboard white flash LED
 
 bool camera_ready = false;
 
@@ -14,6 +32,9 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   Serial.setDebugOutput(false);
   Serial.println("STATUS:booting");
+
+  pinMode(FLASH_LED_PIN, OUTPUT);
+  digitalWrite(FLASH_LED_PIN, LOW);
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -86,8 +107,12 @@ void loop() {
 void captureAndSend() {
   Serial.println("STATUS:capturing");
 
+  digitalWrite(FLASH_LED_PIN, HIGH);
+  delay(50);   // let exposure settle with the flash on
+
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
+    digitalWrite(FLASH_LED_PIN, LOW);
     Serial.println("STATUS:capture_failed");
     return;
   }
@@ -95,5 +120,6 @@ void captureAndSend() {
   Serial.printf("IMAGE:%u\n", fb->len);
   Serial.write(fb->buf, fb->len);
   esp_camera_fb_return(fb);
+  digitalWrite(FLASH_LED_PIN, LOW);
   Serial.println("\nSTATUS:done");
 }

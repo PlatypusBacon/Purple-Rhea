@@ -1,6 +1,6 @@
 # Central configuration — edit here, nowhere else
 
-SERIAL_PORT    = "COM15"       # change to /dev/ttyUSB0 on Linux/Pi
+SERIAL_PORT    = "/dev/cu.usbserial-A5069RR4"       # change to /dev/ttyUSB0 on Linux/Pi
 BAUD_RATE      = 115200
 TOTAL_FRAMES   = 36
 STEP_DEGREES   = 10.0

@@ -1,6 +1,7 @@
-camera/build
-base/build
+build/
 .basemv
 .basenv
 .DS_Store
 Purple-Rhea.wiki/
+output/
+__pycache__/
