@@ -19,7 +19,7 @@
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
 
-#define SERIAL_BAUD     115200
+#define SERIAL_BAUD     921600
 #define TRIGGER_COMMAND "capture"
 #define FLASH_LED_PIN   4   // AI Thinker ESP32-CAM onboard white flash LED
 
@@ -63,12 +63,12 @@ void setup() {
   config.fb_count     = 1;
 
   if (psramFound()) {
-    config.frame_size   = FRAMESIZE_QVGA;
+    config.frame_size   = FRAMESIZE_UXGA;   // 1600 x 1200
     config.jpeg_quality = 10;
     config.fb_count     = 2;
     config.grab_mode    = CAMERA_GRAB_LATEST;
   } else {
-    config.frame_size  = FRAMESIZE_SVGA;
+    config.frame_size  = FRAMESIZE_SVGA;    // 800 x 600 (DRAM limit)
     config.fb_location = CAMERA_FB_IN_DRAM;
   }
 
@@ -77,6 +77,19 @@ void setup() {
     Serial.printf("STATUS:camera_init_failed:0x%x\n", err);
     // Don't reboot — just halt so Python can still connect
     while (true) { delay(1000); }
+  }
+
+  // Fix the yellow/green tint on first capture — make sure AWB is on
+  sensor_t *s = esp_camera_sensor_get();
+  if (s) {
+    s->set_whitebal(s, 1);   // enable AWB
+    s->set_awb_gain(s, 1);   // enable AWB gain
+    s->set_wb_mode(s, 0);    // 0 = auto
+    s->set_exposure_ctrl(s, 1);
+    s->set_aec2(s, 1);
+    s->set_gain_ctrl(s, 1);
+    s->set_brightness(s, 0);
+    s->set_saturation(s, 0);
   }
 
   camera_ready = true;
@@ -108,7 +121,11 @@ void captureAndSend() {
   Serial.println("STATUS:capturing");
 
   digitalWrite(FLASH_LED_PIN, HIGH);
-  delay(50);   // let exposure settle with the flash on
+  delay(150);   // let exposure + AWB settle with the flash on
+
+  // One warmup frame so AWB/AEC has a fresh reading post-flash.
+  camera_fb_t *warm = esp_camera_fb_get();
+  if (warm) esp_camera_fb_return(warm);
 
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
