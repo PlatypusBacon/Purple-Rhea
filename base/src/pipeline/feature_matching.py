@@ -20,13 +20,13 @@ import numpy as np
 import config
 
 # Minimum good matches required to keep a pair
-MIN_MATCH_COUNT = 10
+MIN_MATCH_COUNT = 8
 
 # Lowe ratio test threshold (lower = stricter)
-RATIO_THRESHOLD = 0.55
+RATIO_THRESHOLD = 0.65
 
 # How many neighbouring frames to match against (each side)
-NEIGHBOUR_WINDOW = 2
+NEIGHBOUR_WINDOW = 5  # match frames up to 50° apart
 
 
 def match_all_pairs(

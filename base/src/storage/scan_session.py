@@ -22,7 +22,7 @@ class CameraPose:
 
     servo_angle_deg: float = config.STEP_DEGREES # Angle the thing moves
     
-    z_position: float = 0.0 # Height of the camera above the plane
+    z_position: float = config.CAMERA_HEIGHT # Height of the camera above the plane
     roll: float = 0.0 # assuming we arent jiggling
     pitch: float = 0.0 # assuming we arent jiggling
     @classmethod
@@ -44,21 +44,29 @@ class CameraPose:
         return self.servo_angle_deg % 360.0
 
     def as_rotation_matrix(self) -> np.ndarray:
-        r = math.radians(self.roll)
-        p = math.radians(self.pitch)
-        # Inward-facing: camera at angle θ must face θ + 180°
-        y = math.radians(self.yaw + 180.0)
-
-        Rx = np.array([[1,           0,            0],
-                    [0,  math.cos(r), -math.sin(r)],
-                    [0,  math.sin(r),  math.cos(r)]])
-        Ry = np.array([[ math.cos(p), 0, math.sin(p)],
-                    [0,            1,           0],
-                    [-math.sin(p), 0, math.cos(p)]])
-        Rz = np.array([[math.cos(y), -math.sin(y), 0],
-                    [math.sin(y),  math.cos(y), 0],
-                    [0,            0,            1]])
-        return Rz @ Ry @ Rx
+        import math
+        import numpy as np
+        
+        angle_rad = math.radians(self.yaw)
+        
+        # Camera position
+        r = config.NOMINAL_RADIUS
+        z = self.z_position
+        
+        # Direction from camera to origin (the object)
+        cam_pos = np.array([r * math.sin(angle_rad), 
+                            r * math.cos(angle_rad), 
+                            z])
+        forward = -cam_pos  # points toward origin
+        forward /= np.linalg.norm(forward)
+        
+        world_up = np.array([0.0, 0.0, 1.0])
+        right = np.cross(forward, world_up)
+        right /= np.linalg.norm(right)
+        up = np.cross(right, forward)
+        
+        R = np.column_stack([right, -up, forward])
+        return R
 
 @dataclass
 class ScanFrame:

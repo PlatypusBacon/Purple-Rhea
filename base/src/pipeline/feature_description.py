@@ -54,7 +54,7 @@ def _build_describer() -> cv2.SIFT:
     return cv2.SIFT_create(
         nfeatures=0,
         nOctaveLayers=3,
-        contrastThreshold=0.04,
+        contrastThreshold=0.08,
         edgeThreshold=10,
         sigma=1.6,
     )

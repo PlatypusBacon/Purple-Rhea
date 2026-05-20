@@ -28,15 +28,67 @@ def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[
     K = _camera_intrinsics()
     
     if matches is not None and keypoints_per_frame is not None:
-        return _recover_projections(frames, matches, keypoints_per_frame, K)
+        return _recover_projections_pnp(frames, matches, keypoints_per_frame, K)
     
     # Fallback: synthesised from servo angle
     projections = []
     for frame in frames:
-        P = _projection_for_pose(frame.pose, K)
+        pose = frame.pose
+        print(f"  frame {frame.index:02d}: yaw={pose.yaw:.1f}°  xy={pose.xy_position}  C=[{pose.xy_position[0]:.4f}, {pose.xy_position[1]:.4f}, {pose.z_position:.4f}]")
+        P = _projection_for_pose(pose, K)
         projections.append(P)
+        R = frame.pose.as_rotation_matrix()
+        # The third column of R is the camera's look direction in world space
+        look = R[:, 2]  
+        print(f"  frame {frame.index:02d}: look direction = {look.round(3)}")
     return projections
 
+def _recover_projections_pnp(frames, matches, keypoints_per_frame, K):
+    """
+    Frame 0 = identity anchor.
+    Triangulate frame 0 vs each other frame directly,
+    then use solvePnPRansac to get metric pose.
+    """
+    import cv2
+    n = len(frames)
+    projections = [None] * n
+    
+    R0, t0 = np.eye(3), np.zeros((3,1))
+    projections[0] = K @ np.hstack([R0, t0])
+    
+    for i in range(1, n):
+        key = (0, i) if (0, i) in matches else None
+        if key is None:
+            projections[i] = projections[i-1]
+            continue
+        
+        dmatches = matches[key]
+        kps_0 = keypoints_per_frame[0]
+        kps_i = keypoints_per_frame[i]
+        
+        pts_0 = np.float32([kps_0[m.queryIdx].pt for m in dmatches])
+        pts_i = np.float32([kps_i[m.trainIdx].pt for m in dmatches])
+        
+        # Triangulate against frame 0 (known pose) → metric 3D points
+        X4d = cv2.triangulatePoints(projections[0], 
+                                     K @ np.hstack([np.eye(3), np.zeros((3,1))]),
+                                     pts_0.T, pts_i.T)
+        X3d = (X4d[:3] / X4d[3]).T  # (M, 3)
+        
+        # PnP: recover pose of frame i from 3D↔2D correspondences
+        ok, rvec, tvec, inliers = cv2.solvePnPRansac(
+            X3d, pts_i, K, None,
+            iterationsCount=1000, reprojectionError=2.0
+        )
+        if not ok or inliers is None or len(inliers) < 6:
+            projections[i] = projections[i-1]
+            continue
+        
+        R, _ = cv2.Rodrigues(rvec)
+        projections[i] = K @ np.hstack([R, tvec])
+        print(f"    frame {i:02d}: PnP from frame 00  ({len(inliers)} inliers)")
+    
+    return projections
 
 def _recover_projections(frames, matches, keypoints_per_frame, K) -> list[np.ndarray]:
     """
@@ -182,25 +234,13 @@ DIST_COEFFS = np.zeros(5, dtype=np.float64)
 # --------------------------------------------------------------------------- #
 
 def _projection_for_pose(pose, K: np.ndarray) -> np.ndarray:
-    """
-    Builds P = K [R | t] for one CameraPose.
-
-    Camera position in world coordinates:
-        If z_position is available:  C = [x, y, z]
-        Otherwise:                   C = [x, y, 0]
-
-    The camera points toward the origin, so:
-        t = -R @ C
-    """
-    R = pose.as_rotation_matrix()          # 3×3, derived from Kalman yaw + imu roll/pitch
+    R = pose.as_rotation_matrix()
 
     xy = pose.xy_position if pose.xy_position is not None \
          else np.array([0.0, 0.0])
     z  = getattr(pose, "z_position", 0.0)
     C  = np.array([xy[0], xy[1], z], dtype=np.float64)
 
-    t = -R @ C                             # translate world origin into camera space
-
-    Rt = np.hstack([R, t.reshape(3, 1)])   # 3×4
-    P  = K @ Rt                            # 3×4 projection matrix
-    return P
+    t = -R @ C
+    Rt = np.hstack([R, t.reshape(3, 1)])
+    return K @ Rt

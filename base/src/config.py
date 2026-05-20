@@ -2,10 +2,12 @@
 
 SERIAL_PORT    = "/dev/cu.usbserial-A5069RR4"       # change to /dev/ttyUSB0 on Linux/Pi
 BAUD_RATE      = 921600
-TOTAL_FRAMES   = 36
+TOTAL_FRAMES   = 31
 STEP_DEGREES   = 10.0
-NOMINAL_RADIUS = 0.2          # metres — measure from your physical rig
+NOMINAL_RADIUS = 0.15          # metres — measure from your physical rig
+CAMERA_HEIGHT = 0.25  # metres above turntable plane
 DEBUG_MODE = True
+DEBUG_VIZ = True   # set False to skip all debug image saving
 
 
 RUN_SURFACE_RECON = True
@@ -14,8 +16,8 @@ SURFACE_METHOD    = "ball_pivot"   # "ball_pivot" or "poisson"
 #   FRAMESIZE_QVGA  ->  320 x 240  (current firmware default)
 #   FRAMESIZE_SVGA  ->  800 x 600  (recommended for reconstruction)
 #   FRAMESIZE_XGA   -> 1024 x 768
-IMAGE_WIDTH  = 756
-IMAGE_HEIGHT = 1008
+IMAGE_WIDTH  = 1600
+IMAGE_HEIGHT = 1200
 LIMIT_MEM=True
 
 MQTT_BROKER    = "localhost"

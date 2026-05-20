@@ -2,11 +2,11 @@
 Orchestrates the full reconstruction pipeline.
 Each step will be fleshed out in its own module.
 """
-
 from storage.scan_session import ScanSession
 import os
 import config
 import numpy as np
+
 
 def run(session: ScanSession) -> str:
     """
@@ -35,6 +35,12 @@ def run(session: ScanSession) -> str:
     keypoints_per_frame = detect_all(images)
     print(f"[2/6] Feature detection complete")
 
+    # Debug: show which keypoints were detected and whether they're inside masks
+    if getattr(config, "DEBUG_VIZ", True):
+        from pipeline.debug_viz import save_keypoint_images, load_masks
+        masks = load_masks(len(images))
+        save_keypoint_images(images, keypoints_per_frame, masks)
+
     # Step 3: Feature description
     from pipeline.feature_description import describe_all
     descriptors_per_frame = describe_all(images, keypoints_per_frame)
@@ -47,24 +53,44 @@ def run(session: ScanSession) -> str:
 
     # Step 5: Pose computation from servo angles + IMU data
     from pipeline.pose_computation import compute_projections
-    projections = compute_projections(
-        list(session.frames),
-        matches=matches if config.DEBUG_MODE else None,
-        keypoints_per_frame=keypoints_per_frame if config.DEBUG_MODE else None,
-    )
+    projections = compute_projections(list(session.frames))
 
     # Step 6: Triangulation → raw point cloud
     from pipeline.triangulation import triangulate
     points_3d = triangulate(matches, projections, keypoints_per_frame)
     print(f"[6/6] Triangulated {len(points_3d)} points")
 
+    # Debug: reproject raw triangulated points onto every frame so you can
+    # immediately see if any projection matrix is badly scaled or rotated
+    if getattr(config, "DEBUG_VIZ", True):
+        from pipeline.debug_viz import save_reprojection_images, load_masks
+        masks = load_masks(len(images))
+        save_reprojection_images(
+            images, points_3d, projections, masks, label="raw"
+        )
+
+    # Save raw points for visualiser comparison (before filtering)
+    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+    raw_path = os.path.join(config.OUTPUT_DIR, "reconstruction_raw.npy")
+    np.save(raw_path, points_3d)
+
     # Step 7: Error filtering
     from pipeline.error_filtering import filter_points
     points_3d = filter_points(points_3d, projections, keypoints_per_frame)
     print(f"[7/7] Filtered to {len(points_3d)} points")
 
-        
-    # Define this before the export block
+    # Debug: reproject filtered points — compare with raw to see what was cut
+    if getattr(config, "DEBUG_VIZ", True):
+        from pipeline.debug_viz import save_reprojection_images, load_masks
+        masks = load_masks(len(images))
+        save_reprojection_images(
+            images, points_3d, projections, masks, label="filtered"
+        )
+
+    # Save filtered points for visualiser
+    filtered_path = os.path.join(config.OUTPUT_DIR, "reconstruction_filtered.npy")
+    np.save(filtered_path, points_3d)
+
     obj_path = os.path.join(config.OUTPUT_DIR, "reconstruction.obj")
 
     # Export
