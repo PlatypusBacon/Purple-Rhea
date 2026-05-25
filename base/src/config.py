@@ -2,7 +2,12 @@
 
 SERIAL_PORT    = "/dev/cu.usbserial-A5069RR4"       # change to /dev/ttyUSB0 on Linux/Pi
 BAUD_RATE      = 921600
-TOTAL_FRAMES   = 35
+
+# XIAO BLE Sense pose tracker on USB CDC-ACM. Set to None to disable and fall
+# back to servo angle / inline LOCATION lines from the camera serial.
+TRACKER_SERIAL_PORT = None                          # e.g. "/dev/ttyACM0"
+TRACKER_BAUD_RATE   = 115200                        # CDC-ACM ignores baud
+TOTAL_FRAMES   = 31
 STEP_DEGREES   = 10.0
 NOMINAL_RADIUS = 0.20          # metres — measure from your physical rig
 CAMERA_HEIGHT = 0.20  # metres above turntable plane
