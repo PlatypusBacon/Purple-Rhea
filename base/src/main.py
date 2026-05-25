@@ -3,17 +3,14 @@ Entry point for the Purple-Rhea base node.
 Swap serial_receiver for mqtt_receiver when MQTT is ready.
 """
 
-from comms.serial_receiver import receive_session_serial
-from comms.disk_session import start_disk_session
+from comms.session import start_session
 from pipeline import runner
 import config
 
 
 def main():
     print("Base Node running")
-    session = start_disk_session()
-
-    session.save_all_jpegs(config.IMAGE_CACHE)   # save for debug
+    session = start_session()
 
     if not session.is_complete():
         print(f"\nWARNING: Only {len(session)}/{config.TOTAL_FRAMES} frames received.")
