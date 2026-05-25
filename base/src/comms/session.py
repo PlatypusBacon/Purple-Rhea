@@ -20,6 +20,7 @@ import cv2
 import numpy as np
 import lgpio
 import paho.mqtt.client as mqtt
+import os
 
 import config
 from storage.scan_session import ScanSession, ScanFrame, CameraPose
@@ -104,6 +105,7 @@ def start_session() -> ScanSession:
     Capture TOTAL_FRAMES images at STEP_DEGREES intervals via the ESP32-CAM
     and stepper motor, returning a fully populated ScanSession.
     """
+    os.remove(config.IMAGE_CACHE + '/*')
     session = ScanSession()
     waiter  = _ImageWaiter()
 
@@ -127,8 +129,10 @@ def start_session() -> ScanSession:
     chip = lgpio.gpiochip_open(0)
     for pin in _PINS:
         lgpio.gpio_claim_output(chip, pin, 0)
-
-    steps_per_frame = round(_STEPS_PER_DEGREE * config.STEP_DEGREES)
+ 
+    steps_per_frame_f = _STEPS_PER_DEGREE * config.STEP_DEGREES  # ~872.6 — keep fractional
+    _motor_phase     = 0   # track phase across increments so sequence is continuous
+    _accumulator     = 0.0 # fractional-step accumulator to prevent drift
 
     try:
         for i in range(config.TOTAL_FRAMES):
@@ -159,6 +163,7 @@ def start_session() -> ScanSession:
             session.add_frame(
                 ScanFrame(index=i, image_bytes=enc.tobytes(), pose=pose)
             )
+            session.save_jpeg(config.IMAGE_CACHE)
             del enc
 
             print(f"  [Session] frame {i} stored  "
@@ -166,11 +171,15 @@ def start_session() -> ScanSession:
 
             # 5. Advance motor (skip after last frame — no need to step back)
             if i < config.TOTAL_FRAMES - 1:
-                print(f"  [Motor] stepping {config.STEP_DEGREES:.0f}° "
-                      f"({steps_per_frame} half-steps)…")
-                _step_motor(chip, steps_per_frame)
+                print(f"  [Motor] stepping {config.STEP_DEGREES:.0f}° …")
+                _accumulator += steps_per_frame_f
+                n = int(_accumulator)
+                _accumulator -= n
+                _motor_phase = _step_motor(chip, n, _motor_phase)
                 _motor_off(chip)
-            time.sleep(2.0)
+ 
+            time.sleep(1.0)
+            
 
     finally:
         _motor_off(chip)
