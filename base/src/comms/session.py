@@ -91,6 +91,11 @@ class _ImageWaiter:
         self._event = threading.Event()
         self._data: bytes | None = None
 
+    def flush(self) -> None:
+        """Discard any image that arrived before we were ready for it."""
+        self._event.clear()
+        self._data = None
+
     def set(self, data: bytes) -> None:
         self._data = data
         self._event.set()
@@ -151,7 +156,8 @@ def start_session() -> ScanSession:
             angle_deg = i * config.STEP_DEGREES
             print(f"\n[Frame {i:02d}/{config.TOTAL_FRAMES}]  angle={angle_deg:.1f}°")
 
-            # 1. Trigger camera
+            # 1. Flush any stale image, then trigger camera
+            waiter.flush()
             mqttc.publish(_TOPIC_TRIGGER, payload=b"1", qos=0)
             print("  [MQTT] trigger sent")
 
