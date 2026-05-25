@@ -59,20 +59,9 @@ def publish_event(event_type: str, data: dict | None = None):
 # ── Scan thread ──────────────────────────────────────────────────────────────
 
 def on_scan_triggered():
-    """Called when the Start Scan button is pressed. Runs the main pipeline."""
-    from comms.disk_session import start_disk_session
-    from pipeline import runner
-    import config
-
-    print("Scan triggered from web UI")
-    session = start_disk_session()
-    session.save_all_jpegs(config.IMAGE_CACHE)
-
-    if not session.is_complete():
-        print(f"WARNING: Only {len(session)}/{config.TOTAL_FRAMES} frames received.")
-
-    obj_path = runner.run(session)
-    print(f"Done. Model saved to: {obj_path}")
+    """Called when the Start Scan button is pressed."""
+    from main import main
+    main()
 
 
 def _scan_thread():
