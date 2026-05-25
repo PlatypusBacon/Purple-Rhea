@@ -43,4 +43,4 @@ TOPIC_LOCATION = "rhea/tracking/location"
 TOPIC_RESULT   = "rhea/pc/result"
 
 OUTPUT_DIR  = "output"
-IMAGE_CACHE = "../output/frames"
+IMAGE_CACHE = "../../output/frames"

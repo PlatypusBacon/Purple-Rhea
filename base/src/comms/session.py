@@ -7,6 +7,8 @@ Runs a full 360° scan by:
   3. Loading it into a ScanFrame / ScanSession
   4. Stepping the stepper motor 10° via lgpio
   5. Repeating for all 36 frames
+
+Replaces the old debug file-reader version of start_session().
 """
 
 from __future__ import annotations
@@ -40,8 +42,9 @@ _STEP_SEQ = (
     (1, 0, 0, 1),
 )
 
-# 28BYJ-48 via ULN2003: 4096 half-steps per full revolution
-_STEPS_PER_REV = 4096
+# 28BYJ-48 via ULN2003: 2048 half-steps per full revolution
+# (stride angle 5.625° / 64 gear ratio = 512 full steps = 2048 half-steps)
+_STEPS_PER_REV = 2048
 _STEPS_PER_DEGREE = _STEPS_PER_REV / 360.0
 
 
