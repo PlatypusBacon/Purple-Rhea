@@ -114,7 +114,7 @@ def start_session() -> ScanSession:
     mqttc.on_message = _on_message
 
     # Use credentials from ESP32-CAM firmware if broker requires auth
-    # mqttc.username_pw_set("47484333", "47484333")
+    mqttc.username_pw_set("47484333", "47484333")
 
     mqttc.connect(config.MQTT_BROKER, config.MQTT_PORT, keepalive=60)
     mqttc.subscribe(_TOPIC_IMAGE, qos=0)
