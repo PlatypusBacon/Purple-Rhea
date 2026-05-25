@@ -32,98 +32,92 @@ def reconstruct_surface(
         return obj_path
 
     import config
+    from skimage.measure import marching_cubes
 
     print(f"    input: {len(points_3d)} points")
 
-    # Sanity-check + bounding box log
     if len(points_3d) < 100:
-        print("    WARNING: fewer than 100 points — fix point cloud first")
-    mins = points_3d.min(axis=0)
-    maxs = points_3d.max(axis=0)
-    print(f"    bounding box: {mins.round(4)} → {maxs.round(4)}  span={( maxs - mins).round(4)}")
-
-    # ------------------------------------------------------------------ #
-    # 1. Build & clean                                                    #
-    # ------------------------------------------------------------------ #
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points_3d)
-    n_raw = len(pcd.points)
-
-    nb_neighbors = getattr(config, "OUTLIER_NB_NEIGHBORS", 20)
-    std_ratio    = getattr(config, "OUTLIER_STD_RATIO", 2.0)
-    pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
-    print(f"    outlier removal: {n_raw} → {len(pcd.points)} (removed {n_raw - len(pcd.points)})")
-
-    if len(pcd.points) < 50:
-        print("    ERROR: too few points after outlier removal — aborting")
+        print("    WARNING: fewer than 100 points")
         return obj_path
 
-    voxel_size = getattr(config, "VOXEL_SIZE", None)
-    if voxel_size is None:
-        distances  = np.asarray(pcd.compute_nearest_neighbor_distance())
-        voxel_size = float(np.percentile(distances, 50))
-        print(f"    auto voxel_size = {voxel_size:.5f}")
-    pcd = pcd.voxel_down_sample(voxel_size=voxel_size)
-    print(f"    after downsample: {len(pcd.points)} points")
+    # ------------------------------------------------------------------ #
+    # 1. Reconstruct the voxel grid from the surviving point positions    #
+    # ------------------------------------------------------------------ #
+    # Infer grid bounds and resolution from config (must match visual_hull)
+    r    =  0.07
+    z_lo = -0.02
+    z_hi =  0.12
+    res  = 80  # must match grid_resolution in compute_visual_hull
+
+    coords_xy = np.linspace(-r,   r,   res)
+    coords_z  = np.linspace(z_lo, z_hi, res)
+
+    # Build occupancy grid
+    grid = np.zeros((res, res, res), dtype=np.uint8)
+
+    # Map each surviving point back to its voxel index
+    # points_3d are voxel centres, so we can reverse-engineer indices
+    step_xy = coords_xy[1] - coords_xy[0]
+    step_z  = coords_z[1]  - coords_z[0]
+
+    ix = np.round((points_3d[:, 0] - coords_xy[0]) / step_xy).astype(int)
+    iy = np.round((points_3d[:, 1] - coords_xy[0]) / step_xy).astype(int)
+    iz = np.round((points_3d[:, 2] - coords_z[0])  / step_z).astype(int)
+
+    # Clip to valid range
+    valid = (ix >= 0) & (ix < res) & (iy >= 0) & (iy < res) & (iz >= 0) & (iz < res)
+    grid[ix[valid], iy[valid], iz[valid]] = 1
 
     # ------------------------------------------------------------------ #
-    # 2. Normals — oriented using real camera centres from P matrices     #
+    # 2. Marching cubes on the occupancy grid                             #
     # ------------------------------------------------------------------ #
-    search_radius = voxel_size * 5.0
-    pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=search_radius, max_nn=50)
-    )
+    # Pad with 1 empty voxel on every face — forces closed surface at boundaries
+    grid_padded = np.pad(grid, pad_width=1, mode='constant', constant_values=0)
 
-    camera_centres = _extract_camera_centres(projections, points_3d)
+    verts_idx, faces, normals, _ = marching_cubes(grid_padded, level=0.5)
 
-    if len(camera_centres) > 1:
-        _orient_normals_multi_view(pcd, camera_centres)
-        print(f"    normals oriented using {len(camera_centres)} real camera centres")
-    else:
-        pcd.orient_normals_towards_camera_location(camera_centres[0])
-        print(f"    normals oriented toward single point {camera_centres[0]}")
+    # Offset indices back by 1 to account for padding, then convert to world coords
+    verts_idx = verts_idx - 1  # undo the padding offset
 
-    # ------------------------------------------------------------------ #
-    # 3. Poisson                                                          #
-    # ------------------------------------------------------------------ #
-    depth      = getattr(config, "POISSON_DEPTH", 8)
-    width      = getattr(config, "POISSON_WIDTH", 0)
-    scale      = getattr(config, "POISSON_SCALE", 1.1)
-    linear_fit = getattr(config, "POISSON_LINEAR_FIT", False)
-
-    print(f"    poisson: depth={depth}, scale={scale}")
-    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-        pcd, depth=depth, width=width, scale=scale, linear_fit=linear_fit,
-    )
-    print(f"    raw mesh: {len(mesh.vertices)} verts, {len(mesh.triangles)} faces")
+    verts = np.zeros_like(verts_idx, dtype=np.float64)
+    verts[:, 0] = coords_xy[0] + verts_idx[:, 0] * step_xy
+    verts[:, 1] = coords_xy[0] + verts_idx[:, 1] * step_xy
+    verts[:, 2] = coords_z[0]  + verts_idx[:, 2] * step_z
 
     # ------------------------------------------------------------------ #
-    # 4. Density trim                                                     #
+    # 3. Convert to Blender coordinate system (matches export.py)         #
     # ------------------------------------------------------------------ #
-    densities_np    = np.asarray(densities)
-    keep_percentile = getattr(config, "POISSON_DENSITY_KEEP_PERCENTILE", 25)
-    threshold       = np.percentile(densities_np, keep_percentile)
-    mesh.remove_vertices_by_mask(densities_np < threshold)
-    print(f"    density trim ({keep_percentile}th pct, threshold={threshold:.3f}): "
-          f"{len(mesh.vertices)} verts, {len(mesh.triangles)} faces")
-    print(f"    density stats: min={densities_np.min():.3f}  "
-          f"median={np.median(densities_np):.3f}  max={densities_np.max():.3f}")
+    blender_verts = verts.copy()
+    blender_verts[:, 1] = -verts[:, 2]
+    blender_verts[:, 2] = -verts[:, 1]
 
     # ------------------------------------------------------------------ #
-    # 5 & 6. Repair + check                                               #
-    # ------------------------------------------------------------------ #
-    mesh = _repair_mesh(mesh)
-    _check_printability(mesh)
-
-    # ------------------------------------------------------------------ #
-    # 7. Write                                                            #
+    # 4. Write .obj                                                        #
     # ------------------------------------------------------------------ #
     mesh_path = obj_path.replace(".obj", "_mesh.obj")
-    ply_path  = obj_path.replace(".obj", "_mesh.ply")
-    o3d.io.write_triangle_mesh(mesh_path, mesh, write_ascii=True)
-    o3d.io.write_triangle_mesh(ply_path,  mesh)
+    os.makedirs(os.path.dirname(mesh_path) or ".", exist_ok=True)
+
+    with open(mesh_path, "w") as f:
+        f.write("# Purple-Rhea marching cubes mesh\n")
+        f.write(f"# {len(blender_verts)} verts, {len(faces)} faces\n\n")
+        for x, y, z in blender_verts:
+            f.write(f"v {x:.6f} {y:.6f} {z:.6f}\n")
+        f.write("\n")
+        for face in faces:
+            # .obj faces are 1-indexed
+            f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
+
     print(f"    wrote {mesh_path}")
-    print(f"    wrote {ply_path}")
+
+    # ------------------------------------------------------------------ #
+    # 5. Printability check via open3d                                    #
+    # ------------------------------------------------------------------ #
+    mesh_o3d = o3d.geometry.TriangleMesh()
+    mesh_o3d.vertices  = o3d.utility.Vector3dVector(blender_verts)
+    mesh_o3d.triangles = o3d.utility.Vector3iVector(faces)
+    mesh_o3d.compute_vertex_normals()
+    _check_printability(mesh_o3d)
+
     return mesh_path
 
 

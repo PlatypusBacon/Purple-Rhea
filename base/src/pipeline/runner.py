@@ -3,6 +3,7 @@ Orchestrates the full reconstruction pipeline.
 Each step will be fleshed out in its own module.
 """
 from storage.scan_session import ScanSession
+from debug.calibrate_fx import save_calibration_inputs
 import os
 import config
 import numpy as np
@@ -50,11 +51,15 @@ def run(session: ScanSession) -> str:
     from pipeline.feature_matching import match_all_pairs
     matches = match_all_pairs(descriptors_per_frame)
     print(f"[4/6] Feature matching complete — {len(matches)} pairs matched")
-
+    
     # Step 5: Pose computation from servo angles + IMU data
     from pipeline.pose_computation import compute_projections
     projections = compute_projections(list(session.frames))
-
+    for i, P in enumerate(projections):
+        # Camera centre C satisfies P @ [C; 1] = 0
+        U, S, Vt = np.linalg.svd(P)
+        C = Vt[-1, :3] / Vt[-1, 3]
+        print(f"frame {i:02d}: camera centre = {C.round(3)}")
     # Step 6: Triangulation → raw point cloud
     from pipeline.triangulation import triangulate
     points_3d = triangulate(matches, projections, keypoints_per_frame)
@@ -105,7 +110,7 @@ def run(session: ScanSession) -> str:
     # Surface reconstruction
     if config.RUN_SURFACE_RECON:
         from pipeline.surface import reconstruct_surface
-        mesh_path = reconstruct_surface(points_3d, obj_path)
+        mesh_path = reconstruct_surface(points_3d, obj_path, projections)
         print(f"  Mesh: {mesh_path}")
 
     return obj_path
