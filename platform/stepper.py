@@ -1,14 +1,8 @@
-#!/usr/bin/env python3
-# ULN2003 + 28BYJ-48 stepper on Raspberry Pi (Bookworm) using lgpio.
-# Spins in fixed angular increments with a pause between each.
-#
-# Wiring (BCM numbering):
+# Wiring
 #   IN1 -> GPIO17 (pin 11)
 #   IN2 -> GPIO18 (pin 12)
 #   IN3 -> GPIO27 (pin 13)
 #   IN4 -> GPIO22 (pin 15)
-#   ULN2003 +  -> external 5V supply
-#   ULN2003 -  -> common ground with the Pi
 
 import time
 import lgpio
@@ -17,17 +11,15 @@ IN1, IN2, IN3, IN4 = 17, 18, 27, 22
 PINS = (IN1, IN2, IN3, IN4)
 
 STEP_DELAY_S       = 0.0013   # 1.3 ms per half-step
-STEPPER_STEPS_PER_REV = 4096  # 28BYJ-48 half-step output (already includes the internal ~63.68:1 gearbox)
+STEPPER_STEPS_PER_REV = 4096  # 28BYJ-48 half-step output
 
-# External gear train between stepper output shaft and the driven load.
-# Pinion (on stepper) meshes with a larger gear → reduction = DRIVEN / DRIVER.
 DRIVER_TEETH = 15
-DRIVEN_TEETH = 115            # assuming this is a simple spur reduction, not a true planetary
+DRIVEN_TEETH = 115           
 
-INCREMENT_DEG      = 10.0     # how far to move the OUTPUT (driven gear) per increment, in degrees
-TOTAL_DEG          = 360.0    # stop after this much total output rotation (None = run forever)
-PAUSE_BETWEEN_S    = 2.0      # total time per increment (spin + idle) — change this to your "x seconds"
-HOLD_TORQUE        = False    # True keeps the last coil energized between moves (hotter, holds position)
+INCREMENT_DEG      = 10.0     # how far to move the output gear
+TOTAL_DEG          = 360.0    
+PAUSE_BETWEEN_S    = 2.0      # total time per increment
+HOLD_TORQUE        = False    
 
 STEPS = (
     (1, 0, 0, 0),
