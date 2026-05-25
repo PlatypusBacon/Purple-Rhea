@@ -266,4 +266,4 @@ def api_config_set():
 if __name__ == "__main__":
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
     os.makedirs(config.IMAGE_CACHE, exist_ok=True)
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=8080, debug=False, threaded=True)

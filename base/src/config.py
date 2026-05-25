@@ -7,7 +7,7 @@ BAUD_RATE      = 921600
 # back to servo angle / inline LOCATION lines from the camera serial.
 TRACKER_SERIAL_PORT = None                          # e.g. "/dev/ttyACM0"
 TRACKER_BAUD_RATE   = 115200                        # CDC-ACM ignores baud
-TOTAL_FRAMES   = 31
+TOTAL_FRAMES   = 36
 STEP_DEGREES   = 10.0
 NOMINAL_RADIUS = 0.15          # metres — measure from your physical rig
 CAMERA_HEIGHT = 0.25  # metres above turntable plane

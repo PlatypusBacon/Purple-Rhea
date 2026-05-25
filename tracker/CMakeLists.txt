@@ -6,6 +6,10 @@ project(base_node)
 target_sources(app PRIVATE
     src/main.c
     src/processing_thread.c
+    src/imu.c
+    src/fusion.c
+    src/zupt.c
+    src/radius.c
 )
 zephyr_include_directories(
     inc
