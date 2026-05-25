@@ -3,5 +3,4 @@ build/
 .basenv
 .DS_Store
 Purple-Rhea.wiki/
-output/
 __pycache__/

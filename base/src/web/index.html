@@ -168,9 +168,10 @@
   /* Frames grid */
   .frame-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    grid-template-columns: repeat(6, 1fr);
+    grid-template-rows: repeat(6, auto);
     gap: 8px;
-    max-height: 400px;
+    max-height: none;
     overflow-y: auto;
   }
 
@@ -185,19 +186,36 @@
   }
   .frame-grid img:hover { transform: scale(1.05); }
 
-  /* 3D viewer */
-  #viewer-container {
+  /* 3D viewers */
+  .viewer-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .viewer-panel {
     width: 100%;
     height: 400px;
-    background: #0a0b10;
+    background: #ffffff;
     border-radius: 8px;
+    border: 1px solid var(--border);
     position: relative;
     overflow: hidden;
   }
 
-  #viewer-container canvas {
+  .viewer-panel canvas {
     width: 100% !important;
     height: 100% !important;
+  }
+
+  .viewer-label {
+    position: absolute;
+    top: 8px; left: 10px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #666;
+    z-index: 1;
   }
 
   .viewer-placeholder {
@@ -205,39 +223,8 @@
     align-items: center;
     justify-content: center;
     height: 100%;
-    color: var(--muted);
+    color: #999;
     font-size: 14px;
-  }
-
-  /* Config form */
-  .config-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-  }
-
-  .config-field label {
-    display: block;
-    font-size: 11px;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-bottom: 4px;
-  }
-
-  .config-field input {
-    width: 100%;
-    padding: 8px 10px;
-    font-family: inherit;
-    font-size: 13px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--text);
-  }
-  .config-field input:focus {
-    outline: none;
-    border-color: var(--accent);
   }
 
   /* Lightbox */
@@ -293,13 +280,8 @@
   <!-- Controls -->
   <div class="card">
     <h2>Controls</h2>
-    <div class="btn-row" style="margin-bottom: 12px;">
-      <button class="primary" id="btn-scan-serial" onclick="startScan('serial')">Scan (Serial)</button>
-      <button id="btn-scan-disk" onclick="startScan('disk')">Scan (Disk)</button>
-    </div>
     <div class="btn-row">
-      <button id="btn-download" onclick="downloadResult()" disabled>Download .obj</button>
-      <button id="btn-view3d" onclick="load3DView()" disabled>View 3D</button>
+      <button class="primary" id="btn-scan" onclick="startScan()">Start Scan</button>
       <button onclick="loadFrames()">Refresh Frames</button>
     </div>
   </div>
@@ -319,16 +301,19 @@
   <!-- 3D Viewer -->
   <div class="card full-width">
     <h2>3D Result</h2>
-    <div id="viewer-container">
-      <div class="viewer-placeholder" id="viewer-placeholder">Run a scan to see the 3D point cloud</div>
+    <div style="margin-bottom: 12px;">
+      <button onclick="load3DView()">Refresh 3D Result</button>
     </div>
-  </div>
-
-  <!-- Config -->
-  <div class="card full-width">
-    <h2>Configuration</h2>
-    <div class="config-grid" id="config-grid"></div>
-    <button style="margin-top: 12px;" onclick="saveConfig()">Save Config</button>
+    <div class="viewer-row">
+      <div class="viewer-panel" id="viewer-points">
+        <span class="viewer-label">Point Cloud</span>
+        <div class="viewer-placeholder" id="placeholder-points">No point cloud</div>
+      </div>
+      <div class="viewer-panel" id="viewer-mesh">
+        <span class="viewer-label">Mesh</span>
+        <div class="viewer-placeholder" id="placeholder-mesh">No mesh</div>
+      </div>
+    </div>
   </div>
 
 </div>
@@ -389,10 +374,7 @@ function updateStatus(d) {
   document.getElementById('stage-text').textContent = d.pipeline_stage || '';
 
   const busy = d.state === 'scanning' || d.state === 'processing';
-  document.getElementById('btn-scan-serial').disabled = busy;
-  document.getElementById('btn-scan-disk').disabled = busy;
-  document.getElementById('btn-download').disabled = d.state !== 'done';
-  document.getElementById('btn-view3d').disabled = d.state !== 'done';
+  document.getElementById('btn-scan').disabled = busy;
 
   if (d.type && d.type !== 'keepalive') {
     addLog(d.type + (d.error ? ': ' + d.error : ''));
@@ -412,19 +394,13 @@ function parsePipelineProgress(stage) {
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 
-function startScan(source) {
-  addLog('Starting scan (' + source + ')...');
+function startScan() {
+  addLog('Starting scan...');
   fetch('/api/scan/start', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({source})
   }).then(r => r.json()).then(d => {
     if (d.error) addLog('Error: ' + d.error);
   });
-}
-
-function downloadResult() {
-  window.location.href = '/api/result/download';
 }
 
 function loadFrames() {
@@ -451,35 +427,28 @@ function closeLightbox() {
   document.getElementById('lightbox').classList.remove('active');
 }
 
-// ── 3D viewer (vanilla WebGL point cloud) ───────────────────────────────────
+// ── 3D viewers (point cloud + mesh side by side) ────────────────────────────
 
-let gl = null;
-let viewerState = { rotX: -0.4, rotY: 0, dist: 1.5, dragging: false, lastX: 0, lastY: 0 };
+let sharedView = { rotX: -0.4, rotY: 0, dist: 1.5, dragging: false, lastX: 0, lastY: 0 };
 
 function load3DView() {
-  addLog('Loading point cloud...');
-  fetch('/api/result/points').then(r => r.json()).then(points => {
-    if (points.error) { addLog(points.error); return; }
-    document.getElementById('viewer-placeholder').style.display = 'none';
-    init3D(points);
-    addLog('Loaded ' + points.length + ' points');
-  });
+  addLog('Loading 3D results...');
+  fetch('/api/result/points').then(r => r.json()).then(data => {
+    if (data.error) { addLog('Points: ' + data.error); return; }
+    document.getElementById('placeholder-points').style.display = 'none';
+    initPointsViewer(data);
+    addLog('Loaded ' + data.length + ' points');
+  }).catch(() => addLog('Could not load points'));
+
+  fetch('/api/result/mesh').then(r => r.json()).then(data => {
+    if (data.error) { addLog('Mesh: ' + data.error); return; }
+    document.getElementById('placeholder-mesh').style.display = 'none';
+    initMeshViewer(data.vertices, data.faces);
+    addLog('Loaded mesh: ' + data.vertices.length + ' verts, ' + data.faces.length + ' faces');
+  }).catch(() => addLog('Could not load mesh'));
 }
 
-function init3D(points) {
-  const container = document.getElementById('viewer-container');
-  let canvas = container.querySelector('canvas');
-  if (!canvas) {
-    canvas = document.createElement('canvas');
-    container.appendChild(canvas);
-  }
-  canvas.width = container.clientWidth;
-  canvas.height = container.clientHeight;
-
-  gl = canvas.getContext('webgl');
-  if (!gl) { addLog('WebGL not supported'); return; }
-
-  // center and scale points
+function centerAndScale(points) {
   let cx = 0, cy = 0, cz = 0;
   for (const p of points) { cx += p[0]; cy += p[1]; cz += p[2]; }
   cx /= points.length; cy /= points.length; cz /= points.length;
@@ -488,82 +457,156 @@ function init3D(points) {
     const r = Math.sqrt((p[0]-cx)**2 + (p[1]-cy)**2 + (p[2]-cz)**2);
     if (r > maxR) maxR = r;
   }
-  const scale = 1.0 / (maxR || 1);
+  const s = 1.0 / (maxR || 1);
+  return { cx, cy, cz, scale: s };
+}
 
-  const verts = new Float32Array(points.length * 3);
-  for (let i = 0; i < points.length; i++) {
-    verts[i*3]   = (points[i][0] - cx) * scale;
-    verts[i*3+1] = (points[i][1] - cy) * scale;
-    verts[i*3+2] = (points[i][2] - cz) * scale;
+function setupCanvas(containerId) {
+  const container = document.getElementById(containerId);
+  let canvas = container.querySelector('canvas');
+  if (!canvas) {
+    canvas = document.createElement('canvas');
+    container.appendChild(canvas);
   }
+  canvas.width = container.clientWidth;
+  canvas.height = container.clientHeight;
+  const gl = canvas.getContext('webgl');
+  return { canvas, gl };
+}
 
-  const vsrc = `
-    attribute vec3 aPos;
-    uniform mat4 uMVP;
-    varying float vDepth;
-    void main() {
-      gl_Position = uMVP * vec4(aPos, 1.0);
-      gl_PointSize = 2.0;
-      vDepth = gl_Position.z / gl_Position.w;
-    }`;
-  const fsrc = `
-    precision mediump float;
-    varying float vDepth;
-    void main() {
-      float d = clamp(0.5 - vDepth * 0.5, 0.2, 1.0);
-      gl_FragColor = vec4(0.486*d, 0.36*d, 0.988*d, 1.0);
-    }`;
+function attachControls(canvas) {
+  canvas.onmousedown = (e) => { sharedView.dragging = true; sharedView.lastX = e.clientX; sharedView.lastY = e.clientY; };
+  canvas.onmouseup = () => { sharedView.dragging = false; };
+  canvas.onmouseleave = () => { sharedView.dragging = false; };
+  canvas.onmousemove = (e) => {
+    if (!sharedView.dragging) return;
+    sharedView.rotY += (e.clientX - sharedView.lastX) * 0.01;
+    sharedView.rotX += (e.clientY - sharedView.lastY) * 0.01;
+    sharedView.lastX = e.clientX;
+    sharedView.lastY = e.clientY;
+  };
+  canvas.onwheel = (e) => { sharedView.dist *= e.deltaY > 0 ? 1.1 : 0.9; e.preventDefault(); };
+}
 
+function makeProgram(gl, vsrc, fsrc) {
   const vs = gl.createShader(gl.VERTEX_SHADER);
   gl.shaderSource(vs, vsrc); gl.compileShader(vs);
   const fs = gl.createShader(gl.FRAGMENT_SHADER);
   gl.shaderSource(fs, fsrc); gl.compileShader(fs);
-
   const prog = gl.createProgram();
   gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+  return prog;
+}
+
+function initPointsViewer(points) {
+  const { canvas, gl } = setupCanvas('viewer-points');
+  if (!gl) return;
+  attachControls(canvas);
+
+  const c = centerAndScale(points);
+  const verts = new Float32Array(points.length * 3);
+  for (let i = 0; i < points.length; i++) {
+    verts[i*3]   = (points[i][0] - c.cx) * c.scale;
+    verts[i*3+1] = (points[i][1] - c.cy) * c.scale;
+    verts[i*3+2] = (points[i][2] - c.cz) * c.scale;
+  }
+
+  const prog = makeProgram(gl,
+    `attribute vec3 aPos; uniform mat4 uMVP;
+     void main() { gl_Position = uMVP * vec4(aPos, 1.0); gl_PointSize = 2.0; }`,
+    `precision mediump float;
+     void main() { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); }`
+  );
   gl.useProgram(prog);
 
   const buf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
   gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
-
   const aPos = gl.getAttribLocation(prog, 'aPos');
   gl.enableVertexAttribArray(aPos);
   gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
 
   const uMVP = gl.getUniformLocation(prog, 'uMVP');
   gl.enable(gl.DEPTH_TEST);
-  gl.clearColor(0.04, 0.043, 0.063, 1);
+  gl.clearColor(1, 1, 1, 1);
+  const n = points.length;
 
-  const numPts = points.length;
-
-  // mouse controls
-  canvas.onmousedown = (e) => { viewerState.dragging = true; viewerState.lastX = e.clientX; viewerState.lastY = e.clientY; };
-  canvas.onmouseup = () => { viewerState.dragging = false; };
-  canvas.onmousemove = (e) => {
-    if (!viewerState.dragging) return;
-    viewerState.rotY += (e.clientX - viewerState.lastX) * 0.01;
-    viewerState.rotX += (e.clientY - viewerState.lastY) * 0.01;
-    viewerState.lastX = e.clientX;
-    viewerState.lastY = e.clientY;
-  };
-  canvas.onwheel = (e) => { viewerState.dist *= e.deltaY > 0 ? 1.1 : 0.9; e.preventDefault(); };
-
-  function render() {
-    const w = canvas.width, h = canvas.height;
-    gl.viewport(0, 0, w, h);
+  (function render() {
+    gl.viewport(0, 0, canvas.width, canvas.height);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-    const mvp = mat4_perspective(45, w/h, 0.01, 100);
-    mat4_translate(mvp, 0, 0, -viewerState.dist);
-    mat4_rotateX(mvp, viewerState.rotX);
-    mat4_rotateY(mvp, viewerState.rotY);
-
+    const mvp = mat4_perspective(45, canvas.width/canvas.height, 0.01, 100);
+    mat4_translate(mvp, 0, 0, -sharedView.dist);
+    mat4_rotateX(mvp, sharedView.rotX);
+    mat4_rotateY(mvp, sharedView.rotY);
     gl.uniformMatrix4fv(uMVP, false, mvp);
-    gl.drawArrays(gl.POINTS, 0, numPts);
+    gl.drawArrays(gl.POINTS, 0, n);
     requestAnimationFrame(render);
+  })();
+}
+
+function initMeshViewer(vertices, faces) {
+  const { canvas, gl } = setupCanvas('viewer-mesh');
+  if (!gl) return;
+  attachControls(canvas);
+
+  const c = centerAndScale(vertices);
+  const scaledVerts = new Float32Array(vertices.length * 3);
+  for (let i = 0; i < vertices.length; i++) {
+    scaledVerts[i*3]   = (vertices[i][0] - c.cx) * c.scale;
+    scaledVerts[i*3+1] = (vertices[i][1] - c.cy) * c.scale;
+    scaledVerts[i*3+2] = (vertices[i][2] - c.cz) * c.scale;
   }
-  render();
+
+  // build line indices from faces (wireframe)
+  const lineSet = new Set();
+  const addEdge = (a, b) => { const lo = Math.min(a,b), hi = Math.max(a,b); lineSet.add(lo + ',' + hi); };
+  for (const f of faces) {
+    for (let i = 0; i < f.length; i++) addEdge(f[i], f[(i+1) % f.length]);
+  }
+  const lineIndices = new Uint32Array(lineSet.size * 2);
+  let li = 0;
+  for (const key of lineSet) {
+    const [a, b] = key.split(',');
+    lineIndices[li++] = parseInt(a);
+    lineIndices[li++] = parseInt(b);
+  }
+
+  const prog = makeProgram(gl,
+    `attribute vec3 aPos; uniform mat4 uMVP;
+     void main() { gl_Position = uMVP * vec4(aPos, 1.0); }`,
+    `precision mediump float;
+     void main() { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); }`
+  );
+  gl.useProgram(prog);
+
+  const vbuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbuf);
+  gl.bufferData(gl.ARRAY_BUFFER, scaledVerts, gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+
+  const ext = gl.getExtension('OES_element_index_uint');
+  const ibuf = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibuf);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, lineIndices, gl.STATIC_DRAW);
+
+  const uMVP = gl.getUniformLocation(prog, 'uMVP');
+  gl.enable(gl.DEPTH_TEST);
+  gl.clearColor(1, 1, 1, 1);
+  const numLines = lineIndices.length;
+
+  (function render() {
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    const mvp = mat4_perspective(45, canvas.width/canvas.height, 0.01, 100);
+    mat4_translate(mvp, 0, 0, -sharedView.dist);
+    mat4_rotateX(mvp, sharedView.rotX);
+    mat4_rotateY(mvp, sharedView.rotY);
+    gl.uniformMatrix4fv(uMVP, false, mvp);
+    gl.drawElements(gl.LINES, numLines, gl.UNSIGNED_INT, 0);
+    requestAnimationFrame(render);
+  })();
 }
 
 // minimal matrix helpers
@@ -608,46 +651,10 @@ function addLog(msg) {
   log.scrollTop = log.scrollHeight;
 }
 
-// ── Config ──────────────────────────────────────────────────────────────────
-
-function loadConfig() {
-  fetch('/api/config').then(r => r.json()).then(cfg => {
-    const grid = document.getElementById('config-grid');
-    grid.innerHTML = '';
-    for (const [key, val] of Object.entries(cfg)) {
-      const div = document.createElement('div');
-      div.className = 'config-field';
-      div.innerHTML = '<label>' + key.replace(/_/g, ' ') + '</label>'
-        + '<input data-key="' + key + '" value="' + val + '">';
-      grid.appendChild(div);
-    }
-  });
-}
-
-function saveConfig() {
-  const inputs = document.querySelectorAll('#config-grid input');
-  const body = {};
-  inputs.forEach(inp => {
-    let v = inp.value;
-    if (v === 'true') v = true;
-    else if (v === 'false') v = false;
-    else if (!isNaN(v) && v !== '') v = Number(v);
-    body[inp.dataset.key] = v;
-  });
-  fetch('/api/config', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(body),
-  }).then(r => r.json()).then(d => {
-    addLog('Config updated: ' + Object.keys(d.updated).join(', '));
-  });
-}
-
 // ── Init ────────────────────────────────────────────────────────────────────
 
 connectSSE();
 loadFrames();
-loadConfig();
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeLightbox();
