@@ -167,6 +167,7 @@ def start_session() -> ScanSession:
                       f"({steps_per_frame} half-steps)…")
                 _step_motor(chip, steps_per_frame)
                 _motor_off(chip)
+            time.sleep(2.0)
 
     finally:
         _motor_off(chip)
