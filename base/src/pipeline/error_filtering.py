@@ -23,7 +23,7 @@ import numpy as np
 REPROJECTION_THRESHOLD_PX = 8.0
 
 # Statistical filter: remove points beyond this many std-devs from centroid
-STATISTICAL_STD_MULTIPLIER = 2.0 #lower is tighter
+STATISTICAL_STD_MULTIPLIER = 2.5 #lower is tighter
 
 
 def filter_points(
@@ -33,12 +33,12 @@ def filter_points(
 ) -> np.ndarray:
     if len(points_3d) == 0:
         return points_3d
-
+    """
     # Pass 1: depth filter
     before = len(points_3d)
-    #points_3d = _depth_filter(points_3d, projections)
-    #print(f"    depth filter:        {before} -> {len(points_3d)} points")
-
+    points_3d = _depth_filter(points_3d, projections)
+    print(f"    depth filter:        {before} -> {len(points_3d)} points")
+"""
     # Pass 2: orbital bounds filter — remove points outside the camera circle
     before = len(points_3d)
     points_3d = _orbital_bounds_filter(points_3d)
@@ -113,23 +113,19 @@ def _statistical_filter(points_3d: np.ndarray) -> np.ndarray:
     return points_3d[dists < threshold]
 
 def _orbital_bounds_filter(points_3d: np.ndarray) -> np.ndarray:
-    centroid = points_3d.mean(axis=0)
-    centred = points_3d - centroid
+    import config
+    # The scanned object sits at the world origin.
+    # Camera radius is NOMINAL_RADIUS (~0.20m), so the object surface
+    # must be closer to the origin than the camera is.
+    # Keep a generous margin — 1.5× the camera radius.
+    max_dist = config.NOMINAL_RADIUS * 1.5
 
-    # PCA to find orbital plane
-    _, _, Vt = np.linalg.svd(centred, full_matrices=False)
-    coords_2d = centred @ Vt[:2].T
-    radial_dist = np.linalg.norm(coords_2d, axis=1)
+    dist_from_origin = np.linalg.norm(points_3d, axis=1)
+    kept = dist_from_origin < max_dist
 
-    # Use data-inferred radius only — SfM scale is arbitrary,
-    # NOMINAL_RADIUS in metres is meaningless here
-    inferred_radius = np.percentile(radial_dist, 90)
-    MARGIN = 0.75   # keep inner 75% — cuts background, keeps object
-    cutoff = inferred_radius * MARGIN
-
-    print(f"      inferred radius: {inferred_radius:.4f}  cutoff: {cutoff:.4f}  "
-          f"({(radial_dist < cutoff).sum()} / {len(points_3d)} kept)")
-    return points_3d[radial_dist < cutoff]
+    print(f"      origin-distance filter: keeping points within {max_dist:.3f}m "
+          f"({kept.sum()} / {len(points_3d)} kept)")
+    return points_3d[kept]
 
 def _depth_filter(
     points_3d: np.ndarray,

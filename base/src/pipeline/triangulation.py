@@ -8,18 +8,22 @@ For each matched pair (i, j) and each good DMatch:
   - Solve via SVD to get the homogeneous 3-D point X
   - Divide by w to get Euclidean (x, y, z)
 
-After triangulation, each 3-D point is reprojected into every frame's saved
-binary mask. Points that fall outside the mask in every single frame are
-discarded — this removes points that were triangulated from border/noisy
-keypoints and land outside the object region.
+Filters applied per pair:
+  1. Reprojection error < 4px on both source frames
+  2. Cheirality: point must be in front of both cameras
+  3. Triangulation angle: 2°–60° (rejects near-parallel and degenerate rays)
+
+After all pairs are merged:
+  4. Mask reprojection filter: point must land inside object mask in ≥1 frame
+  5. Global cheirality: reject any point behind any camera
 
 Input:
-    matches           : dict {(i,j): [DMatch]}         from feature_matching
-    projections       : list[np.ndarray shape (3,4)]    from pose_computation
-    keypoints_per_frame: list[list[cv2.KeyPoint]]       from feature_detection
+    matches            : dict {(i,j): [DMatch]}         from feature_matching
+    projections        : list[np.ndarray shape (3,4)]    from pose_computation
+    keypoints_per_frame: list[list[cv2.KeyPoint]]        from feature_detection
 
 Output:
-    points_3d: np.ndarray shape (N, 3)  — raw point cloud before filtering
+    points_3d: np.ndarray shape (N, 3)  — raw point cloud before error_filtering
 """
 import numpy as np
 import cv2
@@ -31,12 +35,10 @@ def triangulate(
     projections: list[np.ndarray],
     keypoints_per_frame: list[list[cv2.KeyPoint]],
 ) -> np.ndarray:
-    """
-    Triangulate all matched pairs into a single point cloud, then filter
-    out points that reproject outside the object mask in every frame.
-    Returns an (N, 3) float64 array.
-    """
     all_points: list[np.ndarray] = []
+
+    # Pre-compute camera centres once (used for angular check)
+    cam_centres = [_cam_centre(P) for P in projections]
 
     for (i, j), dmatch_list in matches.items():
         P_i = projections[i]
@@ -53,8 +55,45 @@ def triangulate(
             continue
 
         pts4d = _triangulate_dlt(P_i, P_j, pts_i, pts_j)  # (M, 3)
-        all_points.append(pts4d)
-        print(f"    pair ({i:02d},{j:02d}): triangulated {len(pts4d)} points")
+        n_before = len(pts4d)
+
+        # --- Filter 1: reprojection error ---
+        err_i = reproject_error(P_i, pts4d, pts_i)
+        err_j = reproject_error(P_j, pts4d, pts_j)
+        good_reproj = (err_i < 4.0) & (err_j < 4.0)
+
+        # --- Filter 2: cheirality (point in front of both cameras) ---
+        X_h = np.hstack([pts4d, np.ones((len(pts4d), 1))])
+        depth_i = (P_i @ X_h.T)[2]
+        depth_j = (P_j @ X_h.T)[2]
+        good_cheirality = (depth_i > 0) & (depth_j > 0)
+
+        # --- Filter 3: triangulation angle ---
+        C_i = cam_centres[i]
+        C_j = cam_centres[j]
+        rays_i = pts4d - C_i
+        rays_j = pts4d - C_j
+        norm_i = np.linalg.norm(rays_i, axis=1, keepdims=True)
+        norm_j = np.linalg.norm(rays_j, axis=1, keepdims=True)
+        # Avoid divide-by-zero for degenerate points
+        safe_i = np.where(norm_i > 1e-9, norm_i, 1.0)
+        safe_j = np.where(norm_j > 1e-9, norm_j, 1.0)
+        rays_i_n = rays_i / safe_i
+        rays_j_n = rays_j / safe_j
+        cos_angle = np.einsum('ij,ij->i', rays_i_n, rays_j_n)
+        angle_deg = np.degrees(np.arccos(np.clip(cos_angle, -1.0, 1.0)))
+        good_angle = (angle_deg > 2.0) & (angle_deg < 60.0)
+
+        good = good_reproj & good_cheirality & good_angle
+        pts4d = pts4d[good]
+
+        print(f"    pair ({i:02d},{j:02d}): triangulated {n_before} points, "
+              f"kept {len(pts4d)} after filters "
+              f"(reproj={good_reproj.sum()} cheirality={good_cheirality.sum()} "
+              f"angle={good_angle.sum()})")
+
+        if len(pts4d):
+            all_points.append(pts4d)
 
     if not all_points:
         print("    WARNING: no points triangulated — check matches and projections")
@@ -63,17 +102,38 @@ def triangulate(
     raw = np.vstack(all_points)
     print(f"    Total before mask filter: {len(raw)} points")
 
-    # Load the lossless binary masks saved by feature_detection and reject
-    # any 3D point that reprojects outside the mask in every frame.
+    # --- Filter 4: mask reprojection ---
     masks = _load_masks(len(projections))
     if masks:
         raw = _filter_by_masks(raw, projections, masks)
         print(f"    After mask reprojection filter: {len(raw)} points remain")
     else:
         print("    WARNING: no masks found in output/ — skipping mask filter")
-        print("             (run feature_detection first, or check output/ path)")
+
+    # --- Filter 5: global cheirality across ALL cameras ---
+    if len(raw):
+        X_h = np.hstack([raw, np.ones((len(raw), 1))])
+        behind = np.zeros(len(raw), dtype=bool)
+        for P in projections:
+            depths = (P @ X_h.T)[2]
+            behind |= (depths <= 0)
+        n_before = len(raw)
+        raw = raw[~behind]
+        print(f"    Global cheirality filter: {n_before} -> {len(raw)} points "
+              f"(removed {behind.sum()} behind-camera points)")
 
     return raw
+
+
+# --------------------------------------------------------------------------- #
+#  Camera centre                                                               #
+# --------------------------------------------------------------------------- #
+
+def _cam_centre(P: np.ndarray) -> np.ndarray:
+    """Extract camera centre C from projection matrix P (null space of P)."""
+    _, _, Vt = np.linalg.svd(P)
+    C = Vt[-1, :3] / Vt[-1, 3]
+    return C
 
 
 # --------------------------------------------------------------------------- #
@@ -81,11 +141,6 @@ def triangulate(
 # --------------------------------------------------------------------------- #
 
 def _load_masks(n_frames: int) -> list[np.ndarray]:
-    """
-    Load the lossless binary masks saved by feature_detection as PNGs.
-    Returns a list of grayscale masks (0 = excluded, 255 = included).
-    Returns an empty list if any mask is missing so the caller can warn.
-    """
     masks = []
     for i in range(n_frames):
         path = f"output/mask_frame{i:02d}.png"
@@ -112,48 +167,31 @@ def _filter_by_masks(
 ) -> np.ndarray:
     """
     Keep a 3D point if it reprojects inside the object mask in at least one
-    frame. This is vectorised per-frame to avoid a slow Python point loop.
-
-    Strategy: a point must land inside the mask in ANY frame to be kept.
-    Using ANY (rather than ALL) is more lenient and avoids discarding valid
-    points that are occluded or near the border in some views.
+    frame. Vectorised per-frame.
     """
     keep = np.zeros(len(points_3d), dtype=bool)
-
-    # Homogeneous form — (N, 4)
     X_h = np.hstack([points_3d, np.ones((len(points_3d), 1))])
 
     for frame_idx, (P, mask) in enumerate(zip(projections, masks)):
         h, w = mask.shape[:2]
-
-        # Project all points with this frame's matrix — (N, 3)
         proj = (P @ X_h.T).T
-
         depth = proj[:, 2]
         valid_depth = depth > 0
-
-        # Avoid divide-by-zero for points behind the camera
         safe_depth = np.where(valid_depth, depth, 1.0)
         px = proj[:, 0] / safe_depth
         py = proj[:, 1] / safe_depth
-
         ix = px.astype(int)
         iy = py.astype(int)
-
         in_bounds = valid_depth & (ix >= 0) & (ix < w) & (iy >= 0) & (iy < h)
-
-        # Check the mask pixel value for every in-bounds point
         in_mask = np.zeros(len(points_3d), dtype=bool)
         idx = np.where(in_bounds)[0]
         if len(idx):
             in_mask[idx] = mask[iy[idx], ix[idx]] > 0
-
-        keep |= in_mask  # keep if inside mask in ANY frame
+        keep |= in_mask
 
     n_removed = len(points_3d) - keep.sum()
     print(f"    Mask filter: removed {n_removed} out-of-mask points "
           f"({100 * n_removed / max(len(points_3d), 1):.1f}%)")
-
     return points_3d[keep]
 
 
@@ -175,12 +213,18 @@ def _triangulate_dlt(
     """
     p1 = pts1.T.astype(np.float32)
     p2 = pts2.T.astype(np.float32)
-
     X_hom = cv2.triangulatePoints(
         P1.astype(np.float32),
         P2.astype(np.float32),
         p1, p2,
     )  # (4, M)
-
     X_hom /= X_hom[3:4, :]
     return X_hom[:3, :].T   # (M, 3)
+
+
+def reproject_error(P: np.ndarray, X3d: np.ndarray, pts2d: np.ndarray) -> np.ndarray:
+    """Per-point reprojection error in pixels."""
+    X4 = np.hstack([X3d, np.ones((len(X3d), 1))]).T
+    proj = P @ X4
+    proj = proj[:2] / proj[2]
+    return np.linalg.norm(proj.T - pts2d, axis=1)

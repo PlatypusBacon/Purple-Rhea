@@ -17,18 +17,22 @@ import os
 
 
 def write_obj(points_3d: np.ndarray, path: str) -> None:
-    """
-    Write vertices (and normals if provided) to a .obj file.
-    """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
-    normals = _estimate_normals(points_3d)   # None until implemented
+    # OpenCV → Blender coordinate system:
+    #   OpenCV:  +X right, +Y down,    +Z forward
+    #   Blender: +X right, +Y forward, +Z up
+    # Remap: Blender_X = CV_X,  Blender_Y = -CV_Z,  Blender_Z = -CV_Y
+    pts = points_3d.copy()
+    pts[:, 1], pts[:, 2] = -points_3d[:, 2], -points_3d[:, 1]
+
+    normals = _estimate_normals(pts)
 
     with open(path, "w") as f:
         f.write("# Purple-Rhea 3D reconstruction\n")
-        f.write(f"# {len(points_3d)} vertices\n\n")
+        f.write(f"# {len(pts)} vertices\n\n")
 
-        for x, y, z in points_3d:
+        for x, y, z in pts:
             f.write(f"v {x:.6f} {y:.6f} {z:.6f}\n")
 
         if normals is not None:
@@ -36,7 +40,7 @@ def write_obj(points_3d: np.ndarray, path: str) -> None:
             for nx, ny, nz in normals:
                 f.write(f"vn {nx:.6f} {ny:.6f} {nz:.6f}\n")
 
-    print(f"    wrote {len(points_3d)} vertices to {path}")
+    print(f"    wrote {len(pts)} vertices to {path}")
 
 
 # --------------------------------------------------------------------------- #

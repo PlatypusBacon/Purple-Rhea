@@ -44,29 +44,26 @@ class CameraPose:
         return self.servo_angle_deg % 360.0
 
     def as_rotation_matrix(self) -> np.ndarray:
-        import math
-        import numpy as np
-        
         angle_rad = math.radians(self.yaw)
-        
-        # Camera position
         r = config.NOMINAL_RADIUS
         z = self.z_position
-        
-        # Direction from camera to origin (the object)
-        cam_pos = np.array([r * math.sin(angle_rad), 
-                            r * math.cos(angle_rad), 
-                            z])
-        forward = -cam_pos  # points toward origin
-        forward /= np.linalg.norm(forward)
-        
+
+        cam_pos = np.array([r * math.sin(angle_rad),
+                            r * math.cos(angle_rad),
+                            z], dtype=np.float64)
+
+        forward = -cam_pos / np.linalg.norm(cam_pos)  # toward origin
         world_up = np.array([0.0, 0.0, 1.0])
-        right = np.cross(forward, world_up)
+
+        right = np.cross(forward, world_up)            # removed negation
+        if np.linalg.norm(right) < 1e-6:
+            right = np.array([1.0, 0.0, 0.0])
         right /= np.linalg.norm(right)
-        up = np.cross(right, forward)
-        
-        R = np.column_stack([right, -up, forward])
-        return R
+
+        down = np.cross(right, forward)                # fixed order
+        down /= np.linalg.norm(down)
+
+        return np.column_stack([right, down, forward])
 
 @dataclass
 class ScanFrame:

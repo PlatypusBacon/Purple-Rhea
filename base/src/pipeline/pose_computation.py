@@ -199,20 +199,11 @@ def _camera_intrinsics() -> np.ndarray:
     fx, fy : focal lengths in pixels
     cx, cy : principal point (image centre)
 
-    These are approximate defaults for 800×600 (SVGA).  Replace with values
-    from a proper checkerboard calibration for best reconstruction accuracy.
-
-    CALIBRATION NOTE:
-        Run OpenCV's calibrateCamera() with a printed checkerboard and a set
-        of images from the ESP32-CAM at the target resolution.  Paste the
-        resulting fx, fy, cx, cy here and set DIST_COEFFS below.
     """
     w, h = config.IMAGE_WIDTH, config.IMAGE_HEIGHT
 
-    # Approximate FOV for OV2640: ~60° horizontal
-    fov_h_rad = math.radians(60.0)
-    fx = (w / 2.0) / math.tan(fov_h_rad / 2.0)
-    fy = fx                        # square pixels assumed
+    fx = 600.0  # ← your measured value here
+    fy = fx     # square pixels assumed
 
     cx = w / 2.0
     cy = h / 2.0
@@ -234,13 +225,29 @@ DIST_COEFFS = np.zeros(5, dtype=np.float64)
 # --------------------------------------------------------------------------- #
 
 def _projection_for_pose(pose, K: np.ndarray) -> np.ndarray:
-    R = pose.as_rotation_matrix()
+    angle_rad = math.radians(pose.yaw)
+    r = config.NOMINAL_RADIUS
+    z = pose.z_position
 
-    xy = pose.xy_position if pose.xy_position is not None \
-         else np.array([0.0, 0.0])
-    z  = getattr(pose, "z_position", 0.0)
-    C  = np.array([xy[0], xy[1], z], dtype=np.float64)
+    # Camera position
+    C = np.array([r * math.sin(angle_rad),
+                  r * math.cos(angle_rad),
+                  z], dtype=np.float64)
 
-    t = -R @ C
-    Rt = np.hstack([R, t.reshape(3, 1)])
-    return K @ Rt
+    # Build R directly here, bypassing as_rotation_matrix entirely
+    forward = -C / np.linalg.norm(C)          # toward origin
+    world_up = np.array([0., 0., 1.])
+    right = np.cross(forward, world_up)
+    right /= np.linalg.norm(right)
+    down = np.cross(right, forward)
+    down /= np.linalg.norm(down)
+    R = np.column_stack([right, down, forward])
+
+    # Verify depth to origin
+    origin_depth = (R @ -C)[2]
+    print(f"    yaw={pose.yaw:.0f}° origin_depth={origin_depth:.4f}  C={C.round(3)}")
+
+    R_world_to_cam = R.T   # or equivalently np.row_stack([right, down, forward])
+
+    t = -R_world_to_cam @ C
+    return K @ np.hstack([R_world_to_cam, t.reshape(3, 1)])
