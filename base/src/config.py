@@ -23,7 +23,14 @@ MQTT_PORT    = 1883
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 NOMINAL_RADIUS              = 0.20
 RUN_SURFACE_RECON           = True
-SURFACE_METHOD              = "poisson"
+SURFACE_METHODS             = ["convex_hull"]#, "alpha", "poisson"]
+# Backward-compatible single-method fallback if SURFACE_METHODS is empty.
+SURFACE_METHOD              = "convex_hull"
+
+# Convex hull options
+CONVEX_HULL_JOGGLE_INPUTS   = True
+# Optional triangle budget after reconstruction (None disables decimation).
+SURFACE_TARGET_TRIANGLES    = 1200
 POISSON_DEPTH               = 9
 POISSON_SCALE               = 1.1
 POISSON_LINEAR_FIT          = False
