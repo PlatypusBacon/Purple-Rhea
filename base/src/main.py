@@ -8,17 +8,20 @@ from pipeline import runner
 import config
 
 
-def main():
+def main(on_frame_captured=None, on_pipeline_progress=None):
     print("Base Node running")
-    session = start_session()
+    session = start_session(on_frame_captured=on_frame_captured)
 
     if not session.is_complete():
         print(f"\nWARNING: Only {len(session)}/{config.TOTAL_FRAMES} frames received.")
-        ans = input("Run pipeline anyway? [y/N]: ")
-        if ans.lower() != "y":
-            return
+        if on_frame_captured is None:
+            ans = input("Run pipeline anyway? [y/N]: ")
+            if ans.lower() != "y":
+                return
+        else:
+            print("Running pipeline with incomplete session (web mode).")
 
-    obj_path = runner.run(session)
+    obj_path = runner.run(session, on_progress=on_pipeline_progress)
     print(f"\nDone. Model saved to: {obj_path}")
 
 

@@ -365,13 +365,15 @@ function updateStatus(d) {
 
   let pct = 0;
   if (d.state === 'scanning') {
-    pct = (d.frames_captured / total) * 50;
+    pct = (d.frames_captured / total) * 100;
     document.getElementById('frame-count').textContent =
       d.frames_captured + ' / ' + d.total_frames + ' frames';
   } else if (d.state === 'processing') {
-    pct = 50 + parsePipelineProgress(d.pipeline_stage) * 50;
+    pct = parsePipelineProgress(d.pipeline_stage) * 100;
   } else if (d.state === 'done') {
     pct = 100;
+    document.getElementById('frame-count').textContent =
+      d.total_frames + ' / ' + d.total_frames + ' frames';
   }
   document.getElementById('progress-fill').style.width = pct + '%';
   document.getElementById('stage-text').textContent = d.pipeline_stage || '';
@@ -393,7 +395,7 @@ function updateStatus(d) {
     addLog(d.type + (d.error ? ': ' + d.error : ''));
   }
 
-  if (d.state === 'done') {
+  if (d.state === 'done' || d.type === 'frame_captured') {
     loadFrames();
   }
 }
@@ -427,12 +429,12 @@ function resetScan() {
 }
 
 function loadFrames() {
-  fetch('/api/frames').then(r => r.json()).then(files => {
+  fetch('/api/frames?t=' + Date.now()).then(r => r.json()).then(files => {
     const grid = document.getElementById('frame-grid');
     grid.innerHTML = '';
     files.forEach(f => {
       const img = document.createElement('img');
-      img.src = '/api/frames/' + f;
+      img.src = '/api/frames/' + f + '?t=' + Date.now();
       img.alt = f;
       img.title = f;
       img.onclick = () => openLightbox('/api/frames/' + f);
