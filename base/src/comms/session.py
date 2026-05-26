@@ -103,7 +103,9 @@ def start_session() -> ScanSession:
             return
         pose_len   = int.from_bytes(data[0:2], 'little')
         if len(data) < 2 + pose_len:
-            print("  [MQTT] truncated envelope — discarding")
+            print(f"  [MQTT] truncated envelope — discarding "
+                  f"(total={len(data)}B, pose_len={pose_len}, "
+                  f"need={2 + pose_len}B)")
             return
         pose_bytes = data[2 : 2 + pose_len]
         jpeg_bytes = data[2 + pose_len :]
