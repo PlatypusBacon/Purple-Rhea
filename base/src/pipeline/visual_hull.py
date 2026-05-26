@@ -26,12 +26,9 @@ MIN_CARVE_VIEWS = 1   # increase to 2 or 3 if you get Swiss-cheese artefacts
 
 
 def compute_visual_hull(images, projections, grid_resolution=80):
-    """
-    Space carving: voxel grid carved by silhouette masks from all views.
-    Returns (N, 3) array of surviving voxel centres.
-    """
     print(f"\n[hull] Building masks for {len(images)} images...")
-    masks = [_build_mask(img, idx) for idx, img in enumerate(images)]
+    masks = [_build_mask(img, P, idx) 
+             for idx, (img, P) in enumerate(zip(images, projections))]
 
     # Save masks for debugging
     os.makedirs("output/silhouettes", exist_ok=True)
@@ -143,7 +140,7 @@ def _project_plate_mask(img: np.ndarray, P: np.ndarray, frame_idx: int) -> np.nd
     """
     h, w = img.shape[:2]
     
-    plate_radius = config.PLATE_RADIUS  # physical radius in metres, e.g. 0.15
+    plate_radius = config.RIG_BASE_LENGTH  # physical radius in metres, e.g. 0.15
     n_points = 360
     
     # Sample points around the plate circle at Z=0 (plate sits on turntable surface)
@@ -180,28 +177,17 @@ def _project_plate_mask(img: np.ndarray, P: np.ndarray, frame_idx: int) -> np.nd
     
     return mask
 
-def _build_mask(img: np.ndarray, frame_idx: int = 0) -> np.ndarray:
-    """
-    Build silhouette mask by:
-      1. Detect the turntable plate rim via Canny + Hough ellipse (or circle).
-      2. Fill the detected plate region.
-      3. Within that region, separate object from plate via brightness/colour.
-      4. Morphological cleanup + largest component.
-    """
+def _build_mask(img: np.ndarray, P: np.ndarray, frame_idx: int = 0) -> np.ndarray:
     h_img, w_img = img.shape[:2]
     gray = _to_gray(img)
 
-    # ------------------------------------------------------------------ #
-    # Stage 1: Find the turntable plate using Canny + contours            #
-    # The plate rim appears as a bright elliptical ring on the dark mat.  #
-    # ------------------------------------------------------------------ #
     plate_mask = _project_plate_mask(img, P, frame_idx)
     plate_px = int(plate_mask.sum() // 255)
     print(f"  [mask {frame_idx:02d}] plate mask covers {plate_px} px "
           f"({100*plate_px/plate_mask.size:.1f}% of image)")
 
     if plate_px < 1000:
-        print(f"  [WARN mask {frame_idx:02d}] plate detection failed — "
+        print(f"  [WARN mask {frame_idx:02d}] projected plate mask too small — "
               f"falling back to centre ellipse")
         plate_mask = _fallback_ellipse(gray)
 
