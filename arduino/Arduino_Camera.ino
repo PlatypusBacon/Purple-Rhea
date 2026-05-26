@@ -2,6 +2,9 @@
 #include "esp_camera.h"
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include "tracker_pose.pb.h"
+#include <pb_encode.h>
+#include <pb_decode.h>
 
 #include "board_config.h"
 
@@ -37,19 +40,63 @@ void sendMQTT(const uint8_t* buf, uint32_t len) {
   }
 }
 
+bool try_read_pose() {
+    if (!TrackerSerial.available()) return false;
+    if (TrackerSerial.read() != 0xAA) return false;
+
+    uint16_t len = ((uint16_t)TrackerSerial.read() << 8)
+                 |  (uint16_t)TrackerSerial.read();
+    if (len == 0 || len > TrackerPose_size) return false;
+
+    uint8_t buf[TrackerPose_size];
+    if (TrackerSerial.readBytes(buf, len) < len) return false;
+    if (TrackerSerial.read() != 0x55) return false;
+
+    pb_istream_t stream = pb_istream_from_buffer(buf, len);
+    return pb_decode(&stream, TrackerPose_fields, &latest_pose);
+}
+
 void take_picture() {
-  camera_fb_t* fb = NULL;
-  if (flash) { digitalWrite(LED_GPIO_NUM, HIGH); }
-  Serial.println("Taking picture");
-  fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("Camera capture failed");
-    return;
-  }
-  Serial.println("Picture taken");
-  digitalWrite(LED_GPIO_NUM, LOW);
-  sendMQTT(fb->buf, fb->len);
-  esp_camera_fb_return(fb);
+    // 1. Encode current pose to temporary buffer
+    uint8_t pose_buf[TrackerPose_size];
+    pb_ostream_t ps = pb_ostream_from_buffer(pose_buf, sizeof(pose_buf));
+    if (!pb_encode(&ps, TrackerPose_fields, &latest_pose)) {
+        Serial.println("pose encode failed");
+        return;
+    }
+    uint16_t pose_len = (uint16_t)ps.bytes_written;
+
+    // 2. Capture JPEG
+    if (flash) digitalWrite(LED_GPIO_NUM, HIGH);
+    camera_fb_t *fb = esp_camera_fb_get();
+    digitalWrite(LED_GPIO_NUM, LOW);
+    if (!fb) { Serial.println("Camera capture failed"); return; }
+
+    // 3. Build envelope: [pose_len 2B LE][pose][jpeg]
+    uint32_t total = 2 + pose_len + fb->len;
+    if (total > MAX_PAYLOAD) {
+        Serial.println("Packet too large");
+        esp_camera_fb_return(fb);
+        return;
+    }
+
+    uint8_t *pkt = (uint8_t *)malloc(total);
+    if (!pkt) {
+        Serial.println("malloc failed");
+        esp_camera_fb_return(fb);
+        return;
+    }
+
+    pkt[0] = pose_len & 0xFF;
+    pkt[1] = (pose_len >> 8) & 0xFF;
+    memcpy(pkt + 2, pose_buf, pose_len);
+    memcpy(pkt + 2 + pose_len, fb->buf, fb->len);
+    esp_camera_fb_return(fb);
+
+    Serial.printf("Publishing %u bytes (pose=%u jpeg=%u)\n",
+                  total, pose_len, total - 2 - pose_len);
+    client.publish(topic_PUBLISH, pkt, total, false);
+    free(pkt);
 }
 
 void set_flash() {
@@ -180,9 +227,8 @@ void setup() {
 }
 
 void loop() {
-  if (!client.connected()) {
-    reconnect();
-  }
-  client.loop();
-  delay(10);
+    if (!client.connected()) reconnect();
+    try_read_pose();   // drain UART each loop
+    client.loop();
+    delay(10);
 }

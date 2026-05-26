@@ -10,6 +10,7 @@ target_sources(app PRIVATE
     src/fusion.c
     src/zupt.c
     src/radius.c
+    src/tracker_pose.pb.c
 )
 zephyr_include_directories(
     inc
