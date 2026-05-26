@@ -35,8 +35,8 @@ POISSON_DEPTH               = 9
 POISSON_SCALE               = 1.1
 POISSON_LINEAR_FIT          = False
 POISSON_DENSITY_KEEP_PERCENTILE = 15
-OUTLIER_NB_NEIGHBORS        = 10
-OUTLIER_STD_RATIO           = 3.5
+OUTLIER_NB_NEIGHBORS        = 30
+OUTLIER_STD_RATIO           = 1.0
 VOXEL_SIZE                  = None
 SMOOTH_ITERATIONS           = 0
 import os as _os

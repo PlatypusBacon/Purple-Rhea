@@ -158,6 +158,7 @@ def _prepare_point_cloud(pts: np.ndarray, o3d):
     import config
 
     pts = np.unique(np.round(pts, 6), axis=0)
+    print(f"    after dedupe: {len(pts)}")
     if len(pts) < 50:
         return None, {}
 
@@ -168,31 +169,26 @@ def _prepare_point_cloud(pts: np.ndarray, o3d):
     diag = float(np.linalg.norm(extent))
     voxel_size = getattr(config, "VOXEL_SIZE", None)
     if voxel_size is None or voxel_size <= 0:
-        voxel_size = max(diag / 220.0, 2e-4)
+        voxel_size = max(diag / 200.0, 2e-4)
 
     pcd = pcd.voxel_down_sample(float(voxel_size))
+    print(f"    after voxel downsample (size={voxel_size:.5f}): {len(pcd.points)}")
 
     nb_neighbors = int(max(10, getattr(config, "OUTLIER_NB_NEIGHBORS", 20)))
     std_ratio = float(max(0.5, getattr(config, "OUTLIER_STD_RATIO", 2.0)))
+
     if len(pcd.points) > nb_neighbors * 2:
-        pcd, _ = pcd.remove_statistical_outlier(
-            nb_neighbors=nb_neighbors,
-            std_ratio=std_ratio,
-        )
+        pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+        print(f"    after statistical filter pass 1: {len(pcd.points)}")
+        pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio * 0.8)
+        print(f"    after statistical filter pass 2: {len(pcd.points)}")
+
+    if len(pcd.points) < 50:
+        return None, {}
 
     nn = np.asarray(pcd.compute_nearest_neighbor_distance(), dtype=np.float64)
     nn = nn[np.isfinite(nn) & (nn > 0)]
     median_nn = float(np.median(nn)) if nn.size > 0 else float(voxel_size)
-
-    radius = max(median_nn * 4.0, voxel_size * 3.0)
-    min_points = max(5, min(20, int(round(len(pcd.points) * 0.005))))
-    if len(pcd.points) > min_points * 2:
-        pcd, _ = pcd.remove_radius_outlier(
-            nb_points=min_points,
-            radius=float(radius),
-        )
-
-    pcd = _keep_largest_point_cluster(pcd, eps=max(median_nn * 5.0, voxel_size * 4.0))
 
     prep = {
         "voxel_size": float(voxel_size),
