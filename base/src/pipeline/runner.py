@@ -47,16 +47,17 @@ def run(session: ScanSession, on_progress=None) -> str:
     np.save(os.path.join(config.OUTPUT_DIR, "projections.npy"), np.array(projections))
 
     # Export .obj
-    obj_path = os.path.join(config.OUTPUT_DIR, "reconstruction.obj")
+    point_path = os.path.join(config.POINT_DIR, "reconstruction.obj")
     from pipeline.export import write_obj
-    write_obj(points_3d, obj_path)
+    write_obj(points_3d, point_path)
     _progress("[4/5] Point cloud exported")
 
     # Surface reconstruction
+    mesh_path = os.path.join(config.MESH_DIR, "reconstruction.obj")
     if config.RUN_SURFACE_RECON:
         from pipeline.surface import reconstruct_surface
-        mesh_path = reconstruct_surface(points_3d, obj_path, projections)
+        mesh_path = reconstruct_surface(points_3d, point_path, projections)
         _progress("[5/5] Surface reconstruction done")
         print(f"  Mesh: {mesh_path}")
 
-    return obj_path
+    return mesh_path
