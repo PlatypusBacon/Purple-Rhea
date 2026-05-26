@@ -5,7 +5,8 @@ from typing import Optional
 import numpy as np
 import math
 
-
+imu_roll_offset:  float = 0.0
+imu_pitch_offset: float = 0.0
 @dataclass
 class CameraPose:
     """
@@ -140,3 +141,68 @@ class CameraPose:
                     [0, math.sin(dr),  math.cos(dr) ]])
 
         return R_world_to_cam @ (Rx @ Ry @ Rz)
+
+@dataclass
+class ScanFrame:
+    """
+    One captured frame: JPEG bytes + the pose at time of capture.
+    index: 0-35, corresponding to 0°-350° in 10° steps.
+    """
+    index:       int
+    image_bytes: bytes
+    pose:        CameraPose
+    # Populated lazily when the pipeline loads the image
+    image_array: Optional[np.ndarray] = field(default=None, repr=False)
+
+    @property
+    def angle_deg(self) -> float:
+        return self.pose.servo_angle_deg
+
+    def load_image(self) -> np.ndarray:
+        """Decode JPEG bytes → BGR numpy array (OpenCV format)."""
+        import cv2
+        buf = np.frombuffer(self.image_bytes, dtype=np.uint8)
+        self.image_array = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        return self.image_array
+
+    def save_jpeg(self, directory: str) -> str:
+        """Write the raw JPEG to disk for debugging."""
+        import os
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, f"frame_{self.index:02d}_{int(self.angle_deg):03d}deg.jpg")
+        with open(path, "wb") as f:
+            f.write(self.image_bytes)
+        return path
+    
+@dataclass
+class ScanSession:
+    """
+    Holds all frames for one complete 360° scan.
+    Acts as the handoff object between the comms layer and the pipeline.
+    """
+    frames: list[ScanFrame] = field(default_factory=list)
+
+
+    def add_frame(self, frame: ScanFrame) -> None:
+        self.frames.append(frame)
+        self.frames.sort(key=lambda f: f.index)
+
+    def is_complete(self) -> bool:
+        from config import TOTAL_FRAMES
+        return len(self.frames) == TOTAL_FRAMES
+
+    def missing_indices(self) -> list[int]:
+        from config import TOTAL_FRAMES
+        received = {f.index for f in self.frames}
+        return [i for i in range(TOTAL_FRAMES) if i not in received]
+
+    def __len__(self) -> int:
+        return len(self.frames)
+
+    def __iter__(self):
+        return iter(self.frames)
+
+    def save_all_jpegs(self, directory: str = "output/frames") -> None:
+        for frame in self.frames:
+            path = frame.save_jpeg(directory)
+            print(f"  saved {path}")
