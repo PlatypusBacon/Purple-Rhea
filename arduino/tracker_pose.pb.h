@@ -11,12 +11,12 @@
 
 /* Struct definitions */
 typedef struct _TrackerPose {
-    float yaw; /* degrees, zeroed on first ZUPT */
-    float pitch;
+    uint32_t step_index;
+    float angle_deg;
     float roll;
-    uint32_t frame_index;
-    float radius; /* metres, from radius_estimate() */
-    bool radius_valid; /* false until estimator converges */
+    float pitch;
+    float yaw;
+    uint32_t timestamp_ms;
 } TrackerPose;
 
 
@@ -29,21 +29,21 @@ extern "C" {
 #define TrackerPose_init_zero                    {0, 0, 0, 0, 0, 0}
 
 /* Field tags (for use in manual encoding/decoding) */
-#define TrackerPose_yaw_tag                      1
-#define TrackerPose_pitch_tag                    2
+#define TrackerPose_step_index_tag               1
+#define TrackerPose_angle_deg_tag                2
 #define TrackerPose_roll_tag                     3
-#define TrackerPose_frame_index_tag              4
-#define TrackerPose_radius_tag                   5
-#define TrackerPose_radius_valid_tag             6
+#define TrackerPose_pitch_tag                    4
+#define TrackerPose_yaw_tag                      5
+#define TrackerPose_timestamp_ms_tag             6
 
 /* Struct field encoding specification for nanopb */
 #define TrackerPose_FIELDLIST(X, a) \
-X(a, STATIC,   SINGULAR, FLOAT,    yaw,               1) \
-X(a, STATIC,   SINGULAR, FLOAT,    pitch,             2) \
+X(a, STATIC,   SINGULAR, UINT32,   step_index,        1) \
+X(a, STATIC,   SINGULAR, FLOAT,    angle_deg,         2) \
 X(a, STATIC,   SINGULAR, FLOAT,    roll,              3) \
-X(a, STATIC,   SINGULAR, UINT32,   frame_index,       4) \
-X(a, STATIC,   SINGULAR, FLOAT,    radius,            5) \
-X(a, STATIC,   SINGULAR, BOOL,     radius_valid,      6)
+X(a, STATIC,   SINGULAR, FLOAT,    pitch,             4) \
+X(a, STATIC,   SINGULAR, FLOAT,    yaw,               5) \
+X(a, STATIC,   SINGULAR, UINT32,   timestamp_ms,      6)
 #define TrackerPose_CALLBACK NULL
 #define TrackerPose_DEFAULT NULL
 
@@ -54,7 +54,7 @@ extern const pb_msgdesc_t TrackerPose_msg;
 
 /* Maximum encoded size of messages (where known) */
 #define TRACKER_POSE_PB_H_MAX_SIZE               TrackerPose_size
-#define TrackerPose_size                         28
+#define TrackerPose_size                         32
 
 #ifdef __cplusplus
 } /* extern "C" */
