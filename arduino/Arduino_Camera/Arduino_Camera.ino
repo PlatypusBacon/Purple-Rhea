@@ -14,13 +14,14 @@ const char *password = "Jg200311";
 
 // MQTT config
 const char* mqttServer = "10.133.32.146";
+const char* mqttServer = "10.133.32.146";
 const char* HostName = "ESP32-CAM";
 const char* mqttUser = "47484333";
 const char* mqttPassword = "47484333";
 const char* topic_PHOTO = "SMILE";
 const char* topic_PUBLISH = "PICTURE";
 const char* topic_FLASH = "FLASH";
-const int MAX_PAYLOAD = 60000;
+const int MAX_PAYLOAD = 250000;
 
 bool flash = true;
 
@@ -46,6 +47,10 @@ static uint16_t pose_rx_len = 0;
 static uint16_t pose_rx_idx = 0;
 static uint32_t pose_rx_last_byte_ms = 0;
 static const uint32_t POSE_RX_TIMEOUT_MS = 50;
+static uint32_t pose_rx_ok_count = 0;
+static uint32_t pose_rx_fail_count = 0;
+static uint32_t pose_rx_last_ok_ms = 0;
+static uint32_t pose_rx_last_log_ms = 0;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -82,6 +87,7 @@ bool try_read_pose() {
         uint32_t now = millis();
         if (pose_rx_state != RX_WAIT_SOF &&
             (now - pose_rx_last_byte_ms) > POSE_RX_TIMEOUT_MS) {
+            Serial.println("[POSE RX] timeout while receiving frame, resetting parser");
             reset_pose_rx();
         }
         pose_rx_last_byte_ms = now;
@@ -101,6 +107,8 @@ bool try_read_pose() {
             case RX_WAIT_LEN_LO:
                 pose_rx_len |= (uint16_t)b;
                 if (pose_rx_len == 0 || pose_rx_len > TrackerPose_size) {
+                    Serial.printf("[POSE RX] invalid payload length=%u (max=%u)\n",
+                                  pose_rx_len, (unsigned)TrackerPose_size);
                     reset_pose_rx();
                 } else {
                     pose_rx_idx = 0;
@@ -120,7 +128,28 @@ bool try_read_pose() {
                     pb_istream_t stream = pb_istream_from_buffer(pose_rx_buf, pose_rx_len);
                     if (pb_decode(&stream, TrackerPose_fields, &latest_pose)) {
                         got_pose = true;
+                        pose_rx_ok_count++;
+                        pose_rx_last_ok_ms = now;
+                        if (pose_rx_ok_count <= 5 || (now - pose_rx_last_log_ms) >= 1000) {
+                            Serial.printf("[POSE RX] ok #%lu frame=%lu yaw=%.2f pitch=%.2f roll=%.2f radius=%.3f valid=%d\n",
+                                          (unsigned long)pose_rx_ok_count,
+                                          (unsigned long)latest_pose.frame_index,
+                                          latest_pose.yaw,
+                                          latest_pose.pitch,
+                                          latest_pose.roll,
+                                          latest_pose.radius,
+                                          latest_pose.radius_valid ? 1 : 0);
+                            pose_rx_last_log_ms = now;
+                        }
+                    } else {
+                        pose_rx_fail_count++;
+                        Serial.printf("[POSE RX] decode failed #%lu (len=%u): %s\n",
+                                      (unsigned long)pose_rx_fail_count,
+                                      pose_rx_len,
+                                      PB_GET_ERROR(&stream));
                     }
+                } else {
+                    Serial.printf("[POSE RX] bad EOF byte 0x%02X (expected 0x55)\n", b);
                 }
                 if (b == 0xAA) {
                     pose_rx_state = RX_WAIT_LEN_HI;
@@ -137,11 +166,17 @@ bool try_read_pose() {
 }
 
 void take_picture() {
+    Serial.printf("[POSE TX] frame=%lu yaw=%.2f pitch=%.2f roll=%.2f\n",
+                  (unsigned long)latest_pose.frame_index,
+                  latest_pose.yaw,
+                  latest_pose.pitch,
+                  latest_pose.roll);
+
     // 1. Encode current pose to temporary buffer
     uint8_t pose_buf[TrackerPose_size];
     pb_ostream_t ps = pb_ostream_from_buffer(pose_buf, sizeof(pose_buf));
     if (!pb_encode(&ps, TrackerPose_fields, &latest_pose)) {
-        Serial.println("pose encode failed");
+        Serial.printf("pose encode failed: %s\n", PB_GET_ERROR(&ps));
         return;
     }
     uint16_t pose_len = (uint16_t)ps.bytes_written;
@@ -185,19 +220,31 @@ void set_flash() {
   Serial.println(flash);
 }
 
-void callback(String topic, byte* message, unsigned int length) {
-  Serial.println(topic);
-  if (topic == topic_PHOTO) { take_picture(); }
-  if (topic == topic_FLASH) { set_flash(); }
+void callback(char* topic, byte* message, unsigned int length) {
+  String topic_s = String(topic);
+  String payload_s;
+  payload_s.reserve(length);
+  for (unsigned int i = 0; i < length; i++) {
+      payload_s += (char)message[i];
+  }
+
+  Serial.printf("[MQTT RX] topic=%s payload_len=%u payload='%s'\n",
+                topic_s.c_str(), length, payload_s.c_str());
+
+  if (topic_s == topic_PHOTO) { take_picture(); }
+  if (topic_s == topic_FLASH) { set_flash(); }
 }
 
 void reconnect() {
   while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
+    Serial.printf("Attempting MQTT connection to %s:%d as %s...\n",
+                  mqttServer, 1883, HostName);
     if (client.connect(HostName, mqttUser, mqttPassword)) {
       Serial.println("connected");
-      client.subscribe(topic_PHOTO);
-      client.subscribe(topic_FLASH);
+      bool photo_ok = client.subscribe(topic_PHOTO);
+      bool flash_ok = client.subscribe(topic_FLASH);
+      Serial.printf("[MQTT RX] subscribed SMILE=%d FLASH=%d\n",
+                    photo_ok ? 1 : 0, flash_ok ? 1 : 0);
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -314,6 +361,11 @@ static uint32_t uart_bytes_seen = 0;
 
 void loop() {
     if (!client.connected()) reconnect();
+    bool got_pose = try_read_pose();   // drain UART each loop
+    if (!got_pose && pose_rx_last_ok_ms > 0 && (millis() - pose_rx_last_ok_ms) > 3000) {
+        Serial.println("[POSE RX] no valid tracker pose for >3s");
+        pose_rx_last_ok_ms = millis();
+    }
 
     int avail = TrackerSerial.available();
     if (avail > 0) uart_bytes_seen += avail;
