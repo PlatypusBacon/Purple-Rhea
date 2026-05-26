@@ -29,12 +29,9 @@ def reconstruct_depth_fusion(images, projections, masks=None):
     n = len(images)
 
     if masks is None:
-        from pipeline.visual_hull import _build_mask
-        print(f"\n[depth] Building masks for {n} images...")
-        masks = [_build_mask(img, i) for i, img in enumerate(images)]
-        os.makedirs("output/silhouettes", exist_ok=True)
-        for i, (img, mask) in enumerate(zip(images, masks)):
-            cv2.imwrite(f"output/silhouettes/mask_{i:02d}.png", mask)
+        print(f"\n[depth] Building projection-based masks for {n} images...")
+        masks = [_project_disk_mask(img, P, i) for i, (img, P) in
+                 enumerate(zip(images, projections))]
 
     os.makedirs(DEBUG_DIR, exist_ok=True)
     _save_camera_centres(projections)
@@ -172,6 +169,59 @@ def _save_flow_debug(flow, mask, img, idx1, idx2):
     flow_bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
     flow_bgr[mask == 0] = 0
     cv2.imwrite(os.path.join(DEBUG_DIR, f"flow_{idx1:02d}_{idx2:02d}.png"), flow_bgr)
+
+
+def _project_disk_mask(img, P, frame_idx):
+    """
+    Project the physical turntable disk (circle at z=0, radius=RIG_BASE_LENGTH)
+    into the image using projection matrix P, and fill the resulting ellipse
+    as the mask.
+    """
+    h_img, w_img = img.shape[:2]
+    R = config.RIG_BASE_LENGTH
+    N_SAMPLES = 360
+
+    angles = np.linspace(0, 2 * np.pi, N_SAMPLES, endpoint=False)
+    world_pts = np.zeros((N_SAMPLES, 4))
+    world_pts[:, 0] = R * np.cos(angles)
+    world_pts[:, 1] = R * np.sin(angles)
+    world_pts[:, 3] = 1.0
+
+    proj = (P @ world_pts.T).T
+    d = proj[:, 2]
+    valid = d > 1e-6
+    if valid.sum() < 5:
+        print(f"  [mask {frame_idx:02d}] disk projection failed — too few valid points")
+        return np.zeros((h_img, w_img), dtype=np.uint8)
+
+    px = (proj[valid, 0] / d[valid]).astype(np.float32)
+    py = (proj[valid, 1] / d[valid]).astype(np.float32)
+
+    contour = np.stack([px, py], axis=1).reshape(-1, 1, 2)
+
+    if len(contour) < 5:
+        print(f"  [mask {frame_idx:02d}] not enough projected points for ellipse fit")
+        return np.zeros((h_img, w_img), dtype=np.uint8)
+
+    ellipse = cv2.fitEllipse(contour)
+
+    mask = np.zeros((h_img, w_img), dtype=np.uint8)
+    cv2.ellipse(mask, ellipse, 255, -1)
+
+    mask_px = int(mask.sum() // 255)
+    (cx, cy), (ax_w, ax_h), angle = ellipse
+    print(f"  [mask {frame_idx:02d}] projected disk: centre=({cx:.0f},{cy:.0f}) "
+          f"axes=({ax_w:.0f},{ax_h:.0f}) angle={angle:.0f}° "
+          f"covers {mask_px} px ({100*mask_px/(h_img*w_img):.1f}%)")
+
+    os.makedirs("output/silhouettes", exist_ok=True)
+    cv2.imwrite(f"output/silhouettes/mask_{frame_idx:02d}.png", mask)
+    debug = img.copy()
+    debug[mask == 0] = (debug[mask == 0] * 0.3).astype(np.uint8)
+    cv2.ellipse(debug, ellipse, (0, 255, 0), 2)
+    cv2.imwrite(f"output/silhouettes/debug_{frame_idx:02d}.jpg", debug)
+
+    return mask
 
 
 def _reproj_filter(X3d, uv1, uv2, P1, P2, thresh):
