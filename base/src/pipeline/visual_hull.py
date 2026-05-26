@@ -174,7 +174,7 @@ def _build_mask(img: np.ndarray, frame_idx: int = 0) -> np.ndarray:
     L   = lab[:, :, 0]
 
     # Bright but not TOO bright: wall behind plate is L > 190
-    cube_bright = cv2.inRange(L, 55, 190)
+    cube_bright = cv2.inRange(L, 80, 190)
 
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     coloured = cv2.inRange(hsv, (0, 60, 40), (180, 255, 255))
@@ -217,75 +217,57 @@ def _build_mask(img: np.ndarray, frame_idx: int = 0) -> np.ndarray:
 
 def _detect_plate_mask(img: np.ndarray, gray: np.ndarray, frame_idx: int) -> np.ndarray:
     h, w = gray.shape
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    L = lab[:, :, 0]
 
     blurred = cv2.GaussianBlur(gray, (9, 9), 2)
     edges = cv2.Canny(blurred, threshold1=20, threshold2=80)
     edges = cv2.dilate(edges, np.ones((7, 7), np.uint8), iterations=2)
-    cv2.imwrite(f"output/silhouettes/edges_{frame_idx:02d}.png", edges)
 
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        print(f"  [plate {frame_idx:02d}] no contours found")
-        return np.zeros((h, w), dtype=np.uint8)
 
     best_mask = None
     best_score = 0
 
-    for cnt in contours:
+    for cnt in (contours or []):
         area = cv2.contourArea(cnt)
-        # Lower area threshold — partial arcs still enclose significant area
-        if area < (h * w * 0.02):
+        if area < (h * w * 0.02) or len(cnt) < 5:
             continue
-        if len(cnt) < 5:
-            continue
-
         try:
             ellipse = cv2.fitEllipse(cnt)
         except cv2.error:
             continue
 
         (ex, ey), (ea, eb), angle = ellipse
-        # ea >= eb always (OpenCV convention: ea is major axis)
-        if eb < 1:
+        if min(ea, eb) < 1:
+            continue
+        if max(ea, eb) / min(ea, eb) > 6.0:
+            continue
+        if ey < h * 0.35:
             continue
 
-        # Accept ellipses where at least ONE axis covers ~30% of the image
-        # This handles partial plate rims that extend beyond the frame
-        if ea < w * 0.25 and eb < h * 0.20:
-            continue
-
-        aspect = ea / eb if eb > 0 else 999
-        # Allow more elongated ellipses (low-angle shots compress the plate)
-        if aspect < 0.15 or aspect > 8.0:
-            continue
-
-        # Circularity of the contour itself (not the fitted ellipse)
-        # Real plate rim arc has high circularity; rig clutter does not
         perimeter = cv2.arcLength(cnt, True)
         if perimeter < 1:
             continue
         circularity = 4 * math.pi * area / (perimeter ** 2)
 
-        # Centre should be roughly in the image (allow outside for partial plates)
         cx_norm = abs(ex / w - 0.5)
-
-        # Heavily weight circularity to reject rig/clutter contours
         score = area * (circularity ** 2) * (1.2 - cx_norm)
 
         print(f"  [plate {frame_idx:02d}] candidate: "
               f"centre=({ex:.0f},{ey:.0f}) axes=({ea:.0f},{eb:.0f}) "
-              f"circ={circularity:.3f} area={area:.0f} score={score:.0f}")
+              f"circ={circularity:.3f} score={score:.0f}")
 
         if score > best_score:
             best_score = score
             best_mask = np.zeros((h, w), dtype=np.uint8)
             cv2.ellipse(best_mask, ellipse, 255, -1)
 
-    if best_mask is None:
-        print(f"  [plate {frame_idx:02d}] no valid ellipse found")
-        return np.zeros((h, w), dtype=np.uint8)
+    if best_mask is not None:
+        return best_mask
 
-    return best_mask
+    print(f"  [plate {frame_idx:02d}] no valid ellipse — using fallback")
+    return _fallback_ellipse(gray)
 
 
 def _fallback_ellipse(gray: np.ndarray) -> np.ndarray:

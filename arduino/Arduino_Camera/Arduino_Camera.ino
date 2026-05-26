@@ -9,11 +9,11 @@
 #include "board_config.h"
 
 // WiFi credentials
-const char *ssid = "Jgggggg";
-const char *password = "Jg200311";
+const char *ssid = "Martinez Mobile Memorial ";
+const char *password = "bilepacling";
 
 // MQTT config
-const char* mqttServer = "10.133.32.146";
+const char* mqttServer = "10.48.233.146";
 const char* HostName = "ESP32-CAM";
 const char* mqttUser = "47484333";
 const char* mqttPassword = "47484333";
@@ -23,6 +23,29 @@ const char* topic_FLASH = "FLASH";
 const int MAX_PAYLOAD = 60000;
 
 bool flash = true;
+
+// Serial port to tracker (UART on GPIO 3 RX)
+#define TrackerSerial Serial1
+#define TRACKER_RX_PIN 3
+#define TRACKER_BAUD   115200
+
+// Pose RX state machine
+enum {
+    RX_WAIT_SOF,
+    RX_WAIT_LEN_HI,
+    RX_WAIT_LEN_LO,
+    RX_WAIT_PAYLOAD,
+    RX_WAIT_EOF
+};
+
+#define POSE_RX_TIMEOUT_MS 100
+
+static uint8_t  pose_rx_state = RX_WAIT_SOF;
+static uint16_t pose_rx_len = 0;
+static uint16_t pose_rx_idx = 0;
+static uint8_t  pose_rx_buf[TrackerPose_size];
+static uint32_t pose_rx_last_byte_ms = 0;
+static TrackerPose latest_pose = TrackerPose_init_zero;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -235,6 +258,8 @@ void setup() {
   pinMode(LED_GPIO_NUM, OUTPUT);
   digitalWrite(LED_GPIO_NUM, LOW);
 #endif
+
+  TrackerSerial.begin(TRACKER_BAUD, SERIAL_8N1, TRACKER_RX_PIN, -1);
 
   WiFi.begin(ssid, password);
   WiFi.setSleep(false);
