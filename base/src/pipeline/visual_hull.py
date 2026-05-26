@@ -87,12 +87,14 @@ def compute_visual_hull(images, projections, grid_resolution=80):
         n_surviving   = int((carve_votes < MIN_CARVE_VIEWS).sum()) if frame_idx == 0 \
                         else int((carve_votes < MIN_CARVE_VIEWS + frame_idx).sum())
 
-        print(f"  frame {frame_idx:02d}: "
-              f"in_bounds={n_in_bounds}  in_mask={n_in_mask}  "
-              f"carve_votes_added={n_carve_votes}  "
-              f"px_range=[{px.min()}..{px.max()}]  "
-              f"py_range=[{py.min()}..{py.max()}]  "
-              f"depth_range=[{depth.min():.4f}..{depth.max():.4f}]")
+        # Report ranges only over valid (in-front-of-camera) voxels
+        if valid.any():
+            print(f"  frame {frame_idx:02d}: "
+                f"in_bounds={n_in_bounds}  in_mask={n_in_mask}  "
+                f"carve_votes_added={n_carve_votes}  "
+                f"px_range=[{px[valid].min()}..{px[valid].max()}]  "
+                f"py_range=[{py[valid].min()}..{py[valid].max()}]  "
+                f"depth_range=[{depth[valid].min():.4f}..{depth[valid].max():.4f}]")
 
         if n_in_bounds == 0:
             print(f"  [WARN] frame {frame_idx:02d}: ZERO voxels project inside image! "
