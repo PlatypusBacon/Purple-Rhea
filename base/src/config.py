@@ -32,8 +32,10 @@ OUTLIER_NB_NEIGHBORS        = 20
 OUTLIER_STD_RATIO           = 2.0
 VOXEL_SIZE                  = None
 SMOOTH_ITERATIONS           = 0
-OUTPUT_DIR                  = "output"
-IMAGE_CACHE                 = "output/frames"
+import os as _os
+_PROJECT_ROOT               = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..")
+OUTPUT_DIR                  = _os.path.join(_PROJECT_ROOT, "output")
+IMAGE_CACHE                 = _os.path.join(_PROJECT_ROOT, "output", "frames")
 DEBUG_MODE                  = True
 DEBUG_VIZ                   = True
 WHITE                       = False
