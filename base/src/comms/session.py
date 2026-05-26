@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 import cv2
@@ -8,13 +9,20 @@ import lgpio
 import paho.mqtt.client as mqtt
 import os
 
+from bleak import BleakClient, BleakScanner
+
 import config
 from storage.scan_session import ScanSession, ScanFrame, CameraPose
 from pipeline.pose_computation import compute_camera_distance
-from tracker_pose_pb2 import TrackerPose   # generated from .proto
+from tracker_pose_pb2 import TrackerPose
 from google.protobuf.message import DecodeError
 
-# ── Stepper motor ──────────────────────────────────────────────────────────────
+# ── BLE config ────────────────────────────────────────────────────────────────
+_BLE_DEVICE_NAME   = "TrackerPose"
+_BLE_POSE_CHR_UUID = "12345678-1234-5678-1234-56789abcdef1"  # notify
+_BLE_REQ_CHR_UUID  = "12345678-1234-5678-1234-56789abcdef2"  # write to request
+
+# ── Stepper motor ─────────────────────────────────────────────────────────────
 IN1, IN2, IN3, IN4 = 17, 18, 27, 22
 _PINS = (IN1, IN2, IN3, IN4)
 _STEP_DELAY_S = 0.0013
@@ -37,10 +45,6 @@ def _wrap_deg180(angle_deg: float) -> float:
 
 
 class _YawFusion:
-    """
-    Tracks IMU yaw as a continuous relative angle and maps it onto the
-    commanded turntable progression.
-    """
     def __init__(self, step_deg: float) -> None:
         self._step_deg = step_deg
         self._prev_raw_yaw: float | None = None
@@ -57,7 +61,6 @@ class _YawFusion:
         step_delta = _wrap_deg180(raw_yaw_deg - self._prev_raw_yaw)
         self._prev_raw_yaw = raw_yaw_deg
 
-        # Reject occasional wrap/glitch jumps that are too large for one frame.
         if abs(step_delta) <= 45.0:
             self._rel_unwrapped += step_delta
 
@@ -77,24 +80,20 @@ class _YawFusion:
 
 
 class _ImuFilter:
-    """Simple low-pass filter for IMU pitch/roll used by reconstruction."""
     def __init__(self, alpha: float = 0.35) -> None:
         self._alpha = alpha
         self._pitch: float | None = None
         self._roll: float | None = None
 
     def update(self, pitch_deg: float, roll_deg: float):
-        # Keep values in a physically plausible range for this rig.
         pitch_deg = max(-89.0, min(89.0, pitch_deg))
-        roll_deg = max(-89.0, min(89.0, roll_deg))
-
+        roll_deg  = max(-89.0, min(89.0, roll_deg))
         if self._pitch is None:
             self._pitch = pitch_deg
-            self._roll = roll_deg
+            self._roll  = roll_deg
         else:
             self._pitch = self._alpha * pitch_deg + (1.0 - self._alpha) * self._pitch
-            self._roll = self._alpha * roll_deg + (1.0 - self._alpha) * self._roll
-
+            self._roll  = self._alpha * roll_deg  + (1.0 - self._alpha) * self._roll
         return self._pitch, self._roll
 
 
@@ -119,7 +118,103 @@ def _motor_off(chip: int) -> None:
         lgpio.gpio_write(chip, pin, 0)
 
 
-# ── MQTT ───────────────────────────────────────────────────────────────────────
+# ── BLE pose client ───────────────────────────────────────────────────────────
+
+class BLEPoseClient:
+    """
+    Manages a persistent BLE connection to the XIAO.
+    Call request_pose() to trigger a single notify → returns TrackerPose.
+    Runs its own asyncio event loop in a background thread.
+    """
+
+    def __init__(self) -> None:
+        self._client: BleakClient | None = None
+        self._loop = asyncio.new_event_loop()
+        self._pose_event = asyncio.Event()
+        self._latest_proto: TrackerPose | None = None
+        self._ready = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        if not self._ready.wait(timeout=30):
+            raise RuntimeError("BLE: timed out connecting to TrackerPose")
+
+    # ── background thread ─────────────────────────────────────────────────
+
+    def _run(self) -> None:
+        self._loop.run_until_complete(self._connect_loop())
+
+    async def _connect_loop(self) -> None:
+        while True:
+            print("[BLE] scanning for 'TrackerPose'...")
+            device = await BleakScanner.find_device_by_name(
+                _BLE_DEVICE_NAME, timeout=15.0
+            )
+            if device is None:
+                print("[BLE] not found — retrying in 5 s")
+                await asyncio.sleep(5)
+                continue
+
+            print(f"[BLE] found {device.address} — connecting")
+            try:
+                async with BleakClient(device) as client:
+                    self._client = client
+                    await client.start_notify(
+                        _BLE_POSE_CHR_UUID, self._on_notify
+                    )
+                    print("[BLE] connected and subscribed")
+                    self._ready.set()
+                    # Just keep alive — requests come in via request_pose()
+                    while client.is_connected:
+                        await asyncio.sleep(0.5)
+            except Exception as e:
+                print(f"[BLE] disconnected: {e} — reconnecting in 3 s")
+                self._client = None
+                self._ready.clear()
+                await asyncio.sleep(3)
+
+    def _on_notify(self, sender, data: bytearray) -> None:
+        proto = TrackerPose()
+        try:
+            proto.ParseFromString(bytes(data))
+        except Exception as e:
+            print(f"[BLE] decode error: {e}")
+            return
+        self._latest_proto = proto
+        # Signal the waiting coroutine from the BLE thread's loop
+        self._loop.call_soon_threadsafe(self._pose_event.set)
+
+    # ── called from main thread ───────────────────────────────────────────
+
+    def request_pose(self, timeout: float = 5.0) -> TrackerPose:
+        """Write to request characteristic → wait for the single notify."""
+        future = asyncio.run_coroutine_threadsafe(
+            self._request_async(timeout), self._loop
+        )
+        return future.result(timeout=timeout + 1.0)
+
+    async def _request_async(self, timeout: float) -> TrackerPose:
+        if self._client is None or not self._client.is_connected:
+            raise RuntimeError("BLE not connected")
+
+        # Clear any previous event before requesting
+        self._pose_event.clear()
+        self._latest_proto = None
+
+        await self._client.write_gatt_char(
+            _BLE_REQ_CHR_UUID, b"\x01", response=False
+        )
+
+        try:
+            await asyncio.wait_for(self._pose_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            raise TimeoutError("BLE pose notify timed out")
+
+        self._pose_event.clear()
+        return self._latest_proto
+
+
+# ── MQTT image waiter ─────────────────────────────────────────────────────────
+
 _TOPIC_TRIGGER = "SMILE"
 _TOPIC_IMAGE   = "PICTURE"
 
@@ -137,7 +232,7 @@ class _ImageWaiter:
         self._data = data
         self._event.set()
 
-    def wait(self, timeout: float = 30.0):
+    def wait(self, timeout: float = 30.0) -> bytes:
         if not self._event.wait(timeout):
             raise TimeoutError(f"No image received within {timeout}s")
         self._event.clear()
@@ -145,7 +240,7 @@ class _ImageWaiter:
         return data
 
 
-# ── Public entry point ─────────────────────────────────────────────────────────
+# ── Public entry point ────────────────────────────────────────────────────────
 
 def start_session(on_frame_captured=None) -> ScanSession:
     if os.path.isdir(config.IMAGE_CACHE):
@@ -155,39 +250,26 @@ def start_session(on_frame_captured=None) -> ScanSession:
                 os.remove(fpath)
         print(f"[start_session] cleared {config.IMAGE_CACHE}")
 
-    session = ScanSession()
-    waiter  = _ImageWaiter()
+    session    = ScanSession()
+    waiter     = _ImageWaiter()
 
-    # ── MQTT ──────────────────────────────────────────────────────────────
+    # ── BLE — connect once, reuse for every frame ──────────────────────
+    print("[BLE] connecting...")
+    ble = BLEPoseClient()
+    print("[BLE] ready")
+
+    # ── MQTT ───────────────────────────────────────────────────────────
     def _on_message(client, userdata, msg):
         if msg.topic != _TOPIC_IMAGE:
             return
         data = bytes(msg.payload)
-
-        # Envelope: [pose_len: 2B LE][proto bytes][jpeg bytes]
-        if len(data) < 2:
+        if len(data) < 4:
             print("  [MQTT] payload too short — discarding")
             return
-        pose_len   = int.from_bytes(data[0:2], 'little')
-        if len(data) < 2 + pose_len:
-            print(f"  [MQTT] truncated envelope — discarding "
-                  f"(total={len(data)}B, pose_len={pose_len}, "
-                  f"need={2 + pose_len}B)")
-            return
-        pose_bytes = data[2 : 2 + pose_len]
-        jpeg_bytes = data[2 + pose_len :]
-
-        pose_proto = TrackerPose()
-        try:
-            pose_proto.ParseFromString(pose_bytes)
-        except DecodeError:
-            print("  [MQTT] pose protobuf decode failed — discarding frame")
-            return
-
-        print(f"  [MQTT] received — frame={pose_proto.frame_index}  yaw={pose_proto.yaw:.1f}°  "
-              f"pitch={pose_proto.pitch:.1f}°  "
-              f"jpeg={len(jpeg_bytes):,}B")
-        waiter.set((jpeg_bytes, pose_proto))
+        # ESP32-CAM no longer bundles pose — payload is raw JPEG
+        # (pose_len prefix will be 0 if you've updated the ESP32-CAM,
+        #  or we just treat the whole payload as JPEG)
+        waiter.set(data)
 
     mqttc = mqtt.Client(client_id="rpi-scanner", protocol=mqtt.MQTTv311)
     mqttc.on_message = _on_message
@@ -196,41 +278,49 @@ def start_session(on_frame_captured=None) -> ScanSession:
     mqttc.subscribe(_TOPIC_IMAGE, qos=0)
     mqttc.loop_start()
 
-    # ── Stepper ───────────────────────────────────────────────────────────
+    # ── Stepper ────────────────────────────────────────────────────────
     chip = lgpio.gpiochip_open(0)
     for pin in _PINS:
         lgpio.gpio_claim_output(chip, pin, 0)
 
     steps_per_frame_f = _STEPS_PER_DEGREE * config.STEP_DEGREES
-    _motor_phase  = 0
-    _accumulator  = 0.0
-    imu_yaw_offset = None   # set on frame 0
-    last_pose_frame_index = None
-    yaw_fusion = _YawFusion(config.STEP_DEGREES)
-    imu_filter = _ImuFilter(alpha=0.35)
+    _motor_phase      = 0
+    _accumulator      = 0.0
+    imu_yaw_offset    = None
+    last_frame_index  = None
+    yaw_fusion        = _YawFusion(config.STEP_DEGREES)
+    imu_filter        = _ImuFilter(alpha=0.35)
 
     try:
         for i in range(config.TOTAL_FRAMES):
             angle_deg = i * config.STEP_DEGREES
             print(f"\n[Frame {i:02d}/{config.TOTAL_FRAMES}]  angle={angle_deg:.1f}°")
 
-            # 1. Flush stale data, trigger camera
+            # 1. Flush stale image, trigger camera
             waiter.flush()
             mqttc.publish(_TOPIC_TRIGGER, payload=b"1", qos=0)
             print("  [MQTT] trigger sent")
 
-            # 2. Wait for envelope (jpeg + proto)
-            jpeg_bytes, pose_proto = waiter.wait(timeout=30.0)
+            # 2. Request pose snapshot from XIAO over BLE
+            print("  [BLE] requesting pose...")
+            pose_proto = ble.request_pose(timeout=5.0)
+            print(f"  [BLE] got pose — frame={pose_proto.frame_index} "
+                  f"yaw={pose_proto.yaw:.1f}° pitch={pose_proto.pitch:.1f}°")
 
-            # 3. Set yaw reference on first frame
+            # 3. Wait for JPEG from ESP32-CAM
+            jpeg_bytes = waiter.wait(timeout=30.0)
+            print(f"  [MQTT] image received — {len(jpeg_bytes):,}B")
+
+            # 4. Stale pose warning
+            if last_frame_index is not None and pose_proto.frame_index == last_frame_index:
+                print(f"  [WARN] pose frame_index did not advance "
+                      f"({pose_proto.frame_index}) — XIAO may be stale")
+            last_frame_index = pose_proto.frame_index
+
+            # 5. Yaw reference
             if imu_yaw_offset is None:
                 imu_yaw_offset = pose_proto.yaw
                 print(f"  [IMU] yaw offset locked at {imu_yaw_offset:.1f}°")
-
-            if last_pose_frame_index is not None and pose_proto.frame_index == last_pose_frame_index:
-                print("  [WARN] tracker pose frame_index did not advance "
-                      f"({pose_proto.frame_index}) — UART data may be stale")
-            last_pose_frame_index = pose_proto.frame_index
 
             fused_yaw_deg, imu_rel_deg, yaw_residual = yaw_fusion.update(
                 pose_proto.yaw, angle_deg, i
@@ -244,7 +334,7 @@ def start_session(on_frame_captured=None) -> ScanSession:
             print("  [IMU] pitch raw={:.1f}° filt={:.1f}°  roll raw={:.1f}° filt={:.1f}°"
                   .format(pose_proto.pitch, filt_pitch_deg, pose_proto.roll, filt_roll_deg))
 
-            # 4. Compute camera-to-centre distance from pitch + rig geometry
+            # 6. Radius
             h = compute_camera_distance(filt_pitch_deg)
             radius_from_tracker = (
                 pose_proto.radius
@@ -265,7 +355,7 @@ def start_session(on_frame_captured=None) -> ScanSession:
                 radius_source = "nominal"
             print(f"  [Pose] radius={radius:.4f}m  source={radius_source}")
 
-            # 5. Build pose
+            # 7. Build pose
             pose = CameraPose.from_proto(
                 servo_angle_deg = fused_yaw_deg,
                 radius          = radius,
@@ -275,7 +365,7 @@ def start_session(on_frame_captured=None) -> ScanSession:
                 imu_yaw_offset  = imu_yaw_offset,
             )
 
-            # 6. Decode, resize, re-encode JPEG
+            # 8. Decode, resize, re-encode JPEG
             buf = np.frombuffer(jpeg_bytes, dtype=np.uint8)
             img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
             if img is None:
@@ -284,7 +374,7 @@ def start_session(on_frame_captured=None) -> ScanSession:
             _, enc = cv2.imencode(".jpg", img)
             del img, buf
 
-            # 7. Store frame
+            # 9. Store frame
             frame = ScanFrame(index=i, image_bytes=enc.tobytes(), pose=pose)
             session.add_frame(frame)
             frame.save_jpeg(config.IMAGE_CACHE)
@@ -295,7 +385,7 @@ def start_session(on_frame_captured=None) -> ScanSession:
             if on_frame_captured:
                 on_frame_captured(i, len(session))
 
-            # 8. Advance motor (skip after last frame)
+            # 10. Advance motor (skip after last frame)
             if i < config.TOTAL_FRAMES - 1:
                 print(f"  [Motor] stepping {config.STEP_DEGREES:.0f}°")
                 _accumulator += steps_per_frame_f

@@ -71,13 +71,15 @@ static void send_pose_uart(float roll, float pitch, float yaw,
 void processing_thread_entry(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
-
+	k_msleep(3000);
 	if (imu_init() != 0) {
 		LOG_ERR("imu_init failed — thread exiting");
 		return;
 	}
+    LOG_INF("uart1 ready");
 	fusion_init();
 	zupt_init();
+	ble_pose_init();
 	radius_init();
 
 	const float dt = 1.0f / (float)SAMPLE_HZ;
@@ -126,19 +128,19 @@ void processing_thread_entry(void *p1, void *p2, void *p3)
 		}
 
 		if (++emit_counter >= EMIT_EVERY_N) {
-			emit_counter = 0;
+            emit_counter = 0;
 
-			float roll, pitch, yaw;
-			fusion_get_euler(&roll, &pitch, &yaw);
-			printk("LOCATION:%.2f,%.2f,%.2f\n",
-				(double)roll, (double)pitch, (double)yaw);
+            float roll, pitch, yaw;
+            fusion_get_euler(&roll, &pitch, &yaw);
+            printk("LOCATION:%.2f,%.2f,%.2f\n",
+                (double)roll, (double)pitch, (double)yaw);
 
-			float r = 0.0f;
-			bool  r_valid = radius_estimate(&r);
-			if (!r_valid) { r = 0.0f; }
+            float r = 0.0f;
+            bool  r_valid = radius_estimate(&r);
+            if (!r_valid) { r = 0.0f; }
 
-			/* Send proto over UART to ESP32-CAM */
-			send_pose_uart(roll, pitch, yaw, r, r_valid, frame_index++);
-		}
+            /* Update cached BLE pose — only sent when Pi requests it */
+            ble_pose_update(roll, pitch, yaw, r, r_valid, frame_index++);
+        }
 	}
 }

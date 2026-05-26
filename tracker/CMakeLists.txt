@@ -11,6 +11,7 @@ target_sources(app PRIVATE
     src/zupt.c
     src/radius.c
     src/tracker_pose.pb.c
+    src/ble_pose.c
 )
 zephyr_include_directories(
     inc

@@ -25,7 +25,7 @@ const int MAX_PAYLOAD = 60000;
 bool flash = true;
 
 // Tracker UART — RX on GPIO 3 (U0RXD), Serial monitor disabled
-#define TRACKER_RX_PIN  3
+#define TRACKER_RX_PIN  13
 #define TRACKER_TX_PIN  -1
 #define TRACKER_BAUD    115200
 
