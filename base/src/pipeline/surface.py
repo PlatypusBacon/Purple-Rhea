@@ -5,7 +5,7 @@ This module expects a point cloud (Nx3) and creates a closed mesh suitable for
 3D printing workflows:
   1) point cleanup (dedupe + outlier filtering + largest cluster)
   2) normal estimation/orientation
-  3) surface reconstruction (Poisson by default)
+  3) surface reconstruction from configurable methods
   4) mesh repair + manifold/watertight checks
 """
 
@@ -45,25 +45,46 @@ def reconstruct_surface(
     )
 
     camera_centres = _extract_camera_centres(projections, np.asarray(pcd.points))
-    _estimate_normals(pcd, o3d, prep, camera_centres)
+    methods = _resolve_surface_methods(config)
+    print(f"[surface] Method order: {methods}")
 
-    method = str(getattr(config, "SURFACE_METHOD", "poisson")).lower()
-    if method in {"poisson", "screened_poisson"}:
-        mesh = _mesh_poisson(pcd, o3d, config)
-    elif method in {"ball_pivoting", "bpa", "ball"}:
-        mesh = _mesh_ball_pivoting(pcd, o3d, prep)
-    elif method in {"alpha", "alpha_shape"}:
-        mesh = _mesh_alpha_shape(pcd, o3d, prep)
-    else:
-        print(f"[surface] Unknown SURFACE_METHOD='{method}', falling back to poisson")
-        mesh = _mesh_poisson(pcd, o3d, config)
+    mesh = None
+    normals_ready = False
+
+    for method in methods:
+        method = str(method).strip().lower()
+        if not method:
+            continue
+
+        if _method_needs_normals(method) and not normals_ready:
+            _estimate_normals(pcd, o3d, prep, camera_centres)
+            normals_ready = True
+
+        try:
+            candidate = _reconstruct_with_method(method, pcd, o3d, prep, config)
+        except Exception as exc:
+            print(f"[surface] method '{method}' failed: {exc}")
+            continue
+
+        if candidate is None or len(candidate.vertices) == 0 or len(candidate.triangles) == 0:
+            print(f"[surface] method '{method}' produced an empty mesh")
+            continue
+
+        candidate = _keep_largest_mesh_component(candidate)
+        candidate = _simplify_mesh(candidate, config)
+        candidate = _repair_mesh(candidate)
+
+        mesh = candidate
+        print(
+            f"[surface] method '{method}' succeeded: "
+            f"{len(mesh.vertices)} verts, {len(mesh.triangles)} faces"
+        )
+        if mesh.is_watertight():
+            break
 
     if mesh is None or len(mesh.vertices) == 0 or len(mesh.triangles) == 0:
-        print("[surface] ERROR: reconstruction produced an empty mesh")
+        print("[surface] ERROR: all surface methods failed")
         return obj_path
-
-    mesh = _keep_largest_mesh_component(mesh)
-    mesh = _repair_mesh(mesh)
 
     if not mesh.is_watertight():
         print("[surface] Mesh is not watertight after first repair - retrying Poisson fallback")
@@ -83,6 +104,38 @@ def reconstruct_surface(
     print(f"[surface] Wrote {mesh_path}")
     _check_printability(mesh)
     return mesh_path
+
+
+def _resolve_surface_methods(config) -> list[str]:
+    raw = getattr(config, "SURFACE_METHODS", None)
+    if isinstance(raw, str):
+        parts = [p.strip().lower() for p in raw.split(",") if p.strip()]
+        if parts:
+            return parts
+    if isinstance(raw, (list, tuple)):
+        parts = [str(p).strip().lower() for p in raw if str(p).strip()]
+        if parts:
+            return parts
+
+    default_method = str(getattr(config, "SURFACE_METHOD", "convex_hull")).strip().lower()
+    return [default_method] if default_method else ["convex_hull"]
+
+
+def _method_needs_normals(method: str) -> bool:
+    return method in {"poisson", "screened_poisson", "ball_pivoting", "bpa", "ball"}
+
+
+def _reconstruct_with_method(method: str, pcd, o3d, prep: dict, config):
+    if method in {"convex_hull", "hull"}:
+        return _mesh_convex_hull(pcd, config)
+    if method in {"poisson", "screened_poisson"}:
+        return _mesh_poisson(pcd, o3d, config)
+    if method in {"ball_pivoting", "bpa", "ball"}:
+        return _mesh_ball_pivoting(pcd, o3d, prep)
+    if method in {"alpha", "alpha_shape"}:
+        return _mesh_alpha_shape(pcd, o3d, prep)
+    print(f"[surface] unknown method '{method}' - skipping")
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -212,6 +265,17 @@ def _mesh_poisson(pcd, o3d, config, depth_boost: int = 0):
     return mesh
 
 
+def _mesh_convex_hull(pcd, config):
+    joggle = bool(getattr(config, "CONVEX_HULL_JOGGLE_INPUTS", True))
+    try:
+        mesh, _ = pcd.compute_convex_hull(joggle_inputs=joggle)
+    except TypeError:
+        mesh, _ = pcd.compute_convex_hull()
+
+    mesh.compute_vertex_normals()
+    return mesh
+
+
 def _mesh_ball_pivoting(pcd, o3d, prep: dict):
     r = float(prep["median_nn"])
     radii = [max(r * 1.5, 1e-4), max(r * 3.0, 2e-4), max(r * 6.0, 4e-4)]
@@ -225,6 +289,24 @@ def _mesh_ball_pivoting(pcd, o3d, prep: dict):
 def _mesh_alpha_shape(pcd, o3d, prep: dict):
     alpha = float(max(prep["median_nn"] * 6.0, prep["voxel_size"] * 4.0, 1e-4))
     mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcd, alpha)
+    return mesh
+
+
+def _simplify_mesh(mesh, config):
+    target = getattr(config, "SURFACE_TARGET_TRIANGLES", None)
+    if target is None:
+        return mesh
+    try:
+        target_i = int(target)
+    except (TypeError, ValueError):
+        return mesh
+    if target_i <= 0 or len(mesh.triangles) <= target_i:
+        return mesh
+    try:
+        mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=target_i)
+        print(f"    simplified mesh to target {target_i} triangles")
+    except Exception as exc:
+        print(f"    simplify failed: {exc}")
     return mesh
 
 
