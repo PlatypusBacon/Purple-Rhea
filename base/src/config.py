@@ -1,6 +1,7 @@
 # ── Scan geometry ──────────────────────────────────────────────────────────────
 TOTAL_FRAMES   = 36
 STEP_DEGREES   = 10.0
+NOMINAL_RADIUS = 0.20        # metres — fallback only, used if h computation fails
 
 # ── Rig physical constants (for compute_camera_distance formula) ───────────────
 RIG_BASE_LENGTH   = 0.13    # r — horizontal base length (metres)
@@ -29,13 +30,13 @@ SURFACE_METHOD              = "convex_hull"
 # Convex hull options
 CONVEX_HULL_JOGGLE_INPUTS   = True
 # Optional triangle budget after reconstruction (None disables decimation).
-SURFACE_TARGET_TRIANGLES    = 1200
+SURFACE_TARGET_TRIANGLES    = None
 POISSON_DEPTH               = 9
 POISSON_SCALE               = 1.1
 POISSON_LINEAR_FIT          = False
 POISSON_DENSITY_KEEP_PERCENTILE = 15
-OUTLIER_NB_NEIGHBORS        = 20
-OUTLIER_STD_RATIO           = 2.0
+OUTLIER_NB_NEIGHBORS        = 10
+OUTLIER_STD_RATIO           = 3.5
 VOXEL_SIZE                  = None
 SMOOTH_ITERATIONS           = 0
 import os as _os
