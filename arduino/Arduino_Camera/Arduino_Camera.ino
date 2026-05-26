@@ -13,7 +13,7 @@ const char *ssid = "Jgggggg";
 const char *password = "Jg200311";
 
 // MQTT config
-const char* mqttServer = "10.134.99.217";
+const char* mqttServer = "10.133.32.146";
 const char* HostName = "ESP32-CAM";
 const char* mqttUser = "47484333";
 const char* mqttPassword = "47484333";
@@ -24,65 +24,129 @@ const int MAX_PAYLOAD = 60000;
 
 bool flash = true;
 
+// Tracker UART — RX on GPIO 3 (U0RXD), Serial monitor disabled
+#define TRACKER_RX_PIN  3
+#define TRACKER_TX_PIN  -1
+#define TRACKER_BAUD    115200
+
+HardwareSerial TrackerSerial(1);        // UART1
+static TrackerPose latest_pose = TrackerPose_init_zero;
+
+enum PoseRxState : uint8_t {
+    RX_WAIT_SOF = 0,
+    RX_WAIT_LEN_HI,
+    RX_WAIT_LEN_LO,
+    RX_WAIT_PAYLOAD,
+    RX_WAIT_EOF,
+};
+
+static PoseRxState pose_rx_state = RX_WAIT_SOF;
+static uint8_t  pose_rx_buf[TrackerPose_size];
+static uint16_t pose_rx_len = 0;
+static uint16_t pose_rx_idx = 0;
+static uint32_t pose_rx_last_byte_ms = 0;
+static const uint32_t POSE_RX_TIMEOUT_MS = 50;
+
 WiFiClient espClient;
 PubSubClient client(espClient);
 
 void startCameraServer();
 void setupLedFlash();
 
-void sendMQTT(const uint8_t* buf, uint32_t len) {
-  Serial.println("Sending picture...");
-  if (len > MAX_PAYLOAD) {
-    Serial.println("Picture too large, increase MAX_PAYLOAD");
-  } else {
-    Serial.print("Picture sent?: ");
-    Serial.println(client.publish(topic_PUBLISH, buf, len, false));
-  }
+static void reset_pose_rx() {
+    pose_rx_state = RX_WAIT_SOF;
+    pose_rx_len = 0;
+    pose_rx_idx = 0;
 }
 
 bool try_read_pose() {
-    if (!TrackerSerial.available()) return false;
-    if (TrackerSerial.read() != 0xAA) return false;
+    bool got_pose = false;
 
-    uint16_t len = ((uint16_t)TrackerSerial.read() << 8)
-                 |  (uint16_t)TrackerSerial.read();
-    if (len == 0 || len > TrackerPose_size) return false;
+    while (TrackerSerial.available()) {
+        int raw = TrackerSerial.read();
+        if (raw < 0) {
+            break;
+        }
+        uint8_t b = (uint8_t)raw;
 
-    uint8_t buf[TrackerPose_size];
-    if (TrackerSerial.readBytes(buf, len) < len) return false;
-    if (TrackerSerial.read() != 0x55) return false;
+        uint32_t now = millis();
+        if (pose_rx_state != RX_WAIT_SOF &&
+            (now - pose_rx_last_byte_ms) > POSE_RX_TIMEOUT_MS) {
+            reset_pose_rx();
+        }
+        pose_rx_last_byte_ms = now;
 
-    pb_istream_t stream = pb_istream_from_buffer(buf, len);
-    return pb_decode(&stream, TrackerPose_fields, &latest_pose);
+        switch (pose_rx_state) {
+            case RX_WAIT_SOF:
+                if (b == 0xAA) {
+                    pose_rx_state = RX_WAIT_LEN_HI;
+                }
+                break;
+
+            case RX_WAIT_LEN_HI:
+                pose_rx_len = ((uint16_t)b) << 8;
+                pose_rx_state = RX_WAIT_LEN_LO;
+                break;
+
+            case RX_WAIT_LEN_LO:
+                pose_rx_len |= (uint16_t)b;
+                if (pose_rx_len == 0 || pose_rx_len > TrackerPose_size) {
+                    reset_pose_rx();
+                } else {
+                    pose_rx_idx = 0;
+                    pose_rx_state = RX_WAIT_PAYLOAD;
+                }
+                break;
+
+            case RX_WAIT_PAYLOAD:
+                pose_rx_buf[pose_rx_idx++] = b;
+                if (pose_rx_idx >= pose_rx_len) {
+                    pose_rx_state = RX_WAIT_EOF;
+                }
+                break;
+
+            case RX_WAIT_EOF:
+                if (b == 0x55) {
+                    pb_istream_t stream = pb_istream_from_buffer(pose_rx_buf, pose_rx_len);
+                    if (pb_decode(&stream, TrackerPose_fields, &latest_pose)) {
+                        got_pose = true;
+                    }
+                }
+                if (b == 0xAA) {
+                    pose_rx_state = RX_WAIT_LEN_HI;
+                    pose_rx_len = 0;
+                    pose_rx_idx = 0;
+                } else {
+                    reset_pose_rx();
+                }
+                break;
+        }
+    }
+
+    return got_pose;
 }
 
 void take_picture() {
-    // 1. Encode current pose to temporary buffer
     uint8_t pose_buf[TrackerPose_size];
     pb_ostream_t ps = pb_ostream_from_buffer(pose_buf, sizeof(pose_buf));
     if (!pb_encode(&ps, TrackerPose_fields, &latest_pose)) {
-        Serial.println("pose encode failed");
         return;
     }
     uint16_t pose_len = (uint16_t)ps.bytes_written;
 
-    // 2. Capture JPEG
     if (flash) digitalWrite(LED_GPIO_NUM, HIGH);
     camera_fb_t *fb = esp_camera_fb_get();
     digitalWrite(LED_GPIO_NUM, LOW);
-    if (!fb) { Serial.println("Camera capture failed"); return; }
+    if (!fb) return;
 
-    // 3. Build envelope: [pose_len 2B LE][pose][jpeg]
     uint32_t total = 2 + pose_len + fb->len;
     if (total > MAX_PAYLOAD) {
-        Serial.println("Packet too large");
         esp_camera_fb_return(fb);
         return;
     }
 
     uint8_t *pkt = (uint8_t *)malloc(total);
     if (!pkt) {
-        Serial.println("malloc failed");
         esp_camera_fb_return(fb);
         return;
     }
@@ -93,44 +157,39 @@ void take_picture() {
     memcpy(pkt + 2 + pose_len, fb->buf, fb->len);
     esp_camera_fb_return(fb);
 
-    Serial.printf("Publishing %u bytes (pose=%u jpeg=%u)\n",
-                  total, pose_len, total - 2 - pose_len);
     client.publish(topic_PUBLISH, pkt, total, false);
     free(pkt);
 }
 
 void set_flash() {
   flash = !flash;
-  Serial.print("Flash set to: ");
-  Serial.println(flash);
 }
 
 void callback(String topic, byte* message, unsigned int length) {
-  Serial.println(topic);
   if (topic == topic_PHOTO) { take_picture(); }
   if (topic == topic_FLASH) { set_flash(); }
 }
 
 void reconnect() {
   while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
+    Serial.print("MQTT connecting...");
     if (client.connect(HostName, mqttUser, mqttPassword)) {
       Serial.println("connected");
       client.subscribe(topic_PHOTO);
       client.subscribe(topic_FLASH);
     } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" retrying in 5s");
+      Serial.printf("failed rc=%d\n", client.state());
       delay(5000);
     }
   }
 }
 
 void setup() {
-  Serial.begin(115200);
-  Serial.setDebugOutput(true);
+  // TX-only Serial on GPIO 1 for debug — RX pin disabled (-1) so GPIO 3 stays free
+  Serial.begin(115200, SERIAL_8N1, -1, 1);
   Serial.println();
+  TrackerSerial.begin(TRACKER_BAUD, SERIAL_8N1, TRACKER_RX_PIN, TRACKER_TX_PIN);
+  Serial.printf("Tracker UART on RX=%d @ %d\n", TRACKER_RX_PIN, TRACKER_BAUD);
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -170,16 +229,12 @@ void setup() {
     }
   }
 
-#if defined(CAMERA_MODEL_ESP_EYE)
-  pinMode(13, INPUT_PULLUP);
-  pinMode(14, INPUT_PULLUP);
-#endif
-
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("Camera init failed with error 0x%x", err);
+    Serial.printf("Camera init failed 0x%x\n", err);
     return;
   }
+  Serial.println("Camera init OK");
 
   sensor_t* s = esp_camera_sensor_get();
   if (s->id.PID == OV3660_PID) {
@@ -214,21 +269,37 @@ void setup() {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\nWiFi connected");
+  Serial.println(" connected");
 
   startCameraServer();
-  Serial.print("Camera Ready! Use 'http://");
-  Serial.print(WiFi.localIP());
-  Serial.println("' to connect");
+  Serial.printf("Camera Ready! http://%s\n", WiFi.localIP().toString().c_str());
 
   client.setServer(mqttServer, 1883);
   client.setBufferSize(MAX_PAYLOAD);
   client.setCallback(callback);
 }
 
+static uint32_t loop_debug_ms = 0;
+static uint32_t pose_ok_count = 0;
+
 void loop() {
     if (!client.connected()) reconnect();
-    try_read_pose();   // drain UART each loop
+    if (try_read_pose()) {
+        pose_ok_count++;
+        Serial.printf("[POSE] #%lu yaw=%.1f pitch=%.1f roll=%.1f\n",
+            (unsigned long)pose_ok_count,
+            (double)latest_pose.yaw,
+            (double)latest_pose.pitch,
+            (double)latest_pose.roll);
+    }
+
+    if (millis() - loop_debug_ms > 5000) {
+        Serial.printf("[DBG] uptime=%lus poses=%lu tracker_avail=%d\n",
+            millis() / 1000, (unsigned long)pose_ok_count,
+            TrackerSerial.available());
+        loop_debug_ms = millis();
+    }
+
     client.loop();
     delay(10);
 }
