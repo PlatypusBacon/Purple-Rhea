@@ -159,64 +159,56 @@ def _build_mask(img: np.ndarray, frame_idx: int = 0) -> np.ndarray:
         plate_mask = _fallback_ellipse(gray)
 
     # ------------------------------------------------------------------ #
-    # Stage 2: Within plate, find object pixels                           #
-    # Strategy: object is NOT the dark plate surface.                     #
-    # Use brightness threshold — plate is dark, cube is bright/coloured.  #
+    # Stage 2: Within plate, isolate ONLY the cube                        #
+    # The plate surface is dark (low value). The cube is bright/coloured. #
+    # Simply threshold: dark = plate surface = background                 #
     # ------------------------------------------------------------------ #
-    # Bright pixels inside the plate region = object
-    _, bright = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY)
     
-    # Also grab saturated/coloured pixels (catches cube faces)
+    # Convert to LAB for better brightness separation
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    L   = lab[:, :, 0]   # L channel: 0=black, 255=white
+    
+    # Plate surface is dark — threshold to find bright (cube) pixels
+    # Tune the threshold (currently 80) if cube bottom gets clipped
+    _, cube_bright = cv2.threshold(L, 80, 255, cv2.THRESH_BINARY)
+    
+    # Also catch all saturated colours (cube faces)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    coloured = cv2.inRange(hsv, (0, 50, 50), (180, 255, 255))
-
-    object_px = cv2.bitwise_or(bright, coloured)
-    object_px = cv2.bitwise_and(object_px, plate_mask)
-
-    obj_px_count = int(object_px.sum() // 255)
-    print(f"  [mask {frame_idx:02d}] object pixels inside plate: {obj_px_count}")
-
-    if obj_px_count < 500:
-        print(f"  [WARN mask {frame_idx:02d}] very few object pixels — "
-              f"check brightness threshold or plate detection")
-        return plate_mask  # fallback: use whole plate
-
-    # ------------------------------------------------------------------ #
-    # Stage 3: Remove the plate surface itself                            #
-    # Erode plate_mask inward slightly, then subtract the plate-coloured  #
-    # border pixels so only the object remains.                           #
-    # ------------------------------------------------------------------ #
-    # Dark plate pixels = low saturation AND low value
-    plate_surface = cv2.inRange(hsv, (0, 0, 0), (180, 60, 80))
-    plate_surface = cv2.bitwise_and(plate_surface, plate_mask)
-    object_px = cv2.bitwise_and(object_px, cv2.bitwise_not(plate_surface))
-
-    # ------------------------------------------------------------------ #
-    # Stage 4: Morphological close to fill the object silhouette          #
-    # ------------------------------------------------------------------ #
-    kernel_close = np.ones((30, 30), np.uint8)
-    kernel_dilate = np.ones((15, 15), np.uint8)
-    object_px = cv2.dilate(object_px, kernel_dilate, iterations=2)
-    object_px = cv2.morphologyEx(object_px, cv2.MORPH_CLOSE, kernel_close)
-
-    morph_px = int(object_px.sum() // 255)
-    print(f"  [mask {frame_idx:02d}] after morphology: {morph_px} px")
-
-    # ------------------------------------------------------------------ #
-    # Stage 5: Largest connected component                                #
-    # ------------------------------------------------------------------ #
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(object_px)
-    if n > 1:
-        largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        object_px = (labels == largest).astype(np.uint8) * 255
-        final_px = int(object_px.sum() // 255)
-        print(f"  [mask {frame_idx:02d}] largest component: {final_px} px "
-              f"[{n-1} components total]")
-    else:
-        print(f"  [mask {frame_idx:02d}] no foreground components found")
+    coloured = cv2.inRange(hsv, (0, 60, 40), (180, 255, 255))
+    
+    # Union: anything bright OR coloured inside the plate
+    cube_px = cv2.bitwise_or(cube_bright, coloured)
+    cube_px = cv2.bitwise_and(cube_px, plate_mask)
+    
+    roi_px = int(cube_px.sum() // 255)
+    print(f"  [mask {frame_idx:02d}] cube pixels inside plate: {roi_px}")
+    
+    if roi_px < 500:
+        print(f"  [WARN mask {frame_idx:02d}] too few cube pixels — returning plate mask")
         return plate_mask
 
-    return object_px
+    # ------------------------------------------------------------------ #
+    # Stage 3: Morphological close to fill the cube silhouette            #
+    # ------------------------------------------------------------------ #
+    kernel_close  = np.ones((25, 25), np.uint8)
+    kernel_dilate = np.ones((10, 10), np.uint8)
+    cube_px = cv2.dilate(cube_px, kernel_dilate, iterations=2)
+    cube_px = cv2.morphologyEx(cube_px, cv2.MORPH_CLOSE, kernel_close)
+
+    # ------------------------------------------------------------------ #
+    # Stage 4: Largest connected component only                           #
+    # ------------------------------------------------------------------ #
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(cube_px)
+    if n > 1:
+        largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        cube_px = (labels == largest).astype(np.uint8) * 255
+        final_px = int(cube_px.sum() // 255)
+        print(f"  [mask {frame_idx:02d}] final cube mask: {final_px} px")
+    else:
+        print(f"  [mask {frame_idx:02d}] no components — falling back to plate mask")
+        return plate_mask
+
+    return cube_px
 
 
 def _detect_plate_mask(img: np.ndarray, gray: np.ndarray, frame_idx: int) -> np.ndarray:
@@ -267,6 +259,8 @@ def _detect_plate_mask(img: np.ndarray, gray: np.ndarray, frame_idx: int) -> np.
 
         (ex, ey), (ea, eb), angle = ellipse
         if eb < 1:
+            continue
+        if ea < w * 0.4 or eb < h * 0.25:
             continue
 
         # Aspect ratio check — plate viewed at an angle gives ellipse,
