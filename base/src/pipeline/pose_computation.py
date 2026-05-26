@@ -190,7 +190,7 @@ DIST_COEFFS = np.zeros(5, dtype=np.float64)
 
 def _projection_for_pose(pose, K: np.ndarray) -> np.ndarray:
     servo_rad = math.radians(pose.servo_angle_deg)
-    h     = pose.radius
+    h     = pose.radius   # computed from pitch via compute_camera_distance
     H     = config.CAMERA_HEIGHT
     horiz = math.sqrt(max(h**2 - H**2, 0.0))
 
@@ -200,7 +200,7 @@ def _projection_for_pose(pose, K: np.ndarray) -> np.ndarray:
         H,
     ], dtype=np.float64)
 
-    # Nominal inward-pointing orientation (world → camera)
+    # Camera always points inward — no IMU correction needed
     forward  = -C / np.linalg.norm(C)
     world_up = np.array([0., 0., 1.])
     right    = np.cross(forward, world_up)
@@ -209,29 +209,11 @@ def _projection_for_pose(pose, K: np.ndarray) -> np.ndarray:
     down    /= np.linalg.norm(down)
     R_world_to_cam = np.column_stack([right, down, forward]).T
 
-    # IMU correction in camera body frame — post-multiply (intrinsic rotations)
-    # Order: roll first, then pitch, then yaw (X → Y → Z in camera frame)
-    dy = math.radians(pose.imu_yaw_corrected)
-    dp = math.radians(pose.imu_pitch_deg)
-    dr = math.radians(pose.imu_roll_deg)
-
-    Rz = np.array([[ math.cos(dy), -math.sin(dy), 0],
-                   [ math.sin(dy),  math.cos(dy), 0],
-                   [ 0,             0,             1]])
-    Ry = np.array([[ math.cos(dp), 0, math.sin(dp)],
-                   [ 0,            1, 0            ],
-                   [-math.sin(dp), 0, math.cos(dp)]])
-    Rx = np.array([[1, 0,             0            ],
-                   [0, math.cos(dr), -math.sin(dr) ],
-                   [0, math.sin(dr),  math.cos(dr) ]])
-
-    # Post-multiply: correction applied in camera frame axes
-    R_final = R_world_to_cam @ (Rx @ Ry @ Rz)
-    t = -R_final @ C
+    t = -R_world_to_cam @ C
 
     print(f"    servo={pose.servo_angle_deg:.0f}°  "
+          f"pitch={pose.imu_pitch_deg:.1f}°  "
           f"h={h:.4f}m  horiz={horiz:.4f}m  "
-          f"imu_yaw_corr={pose.imu_yaw_corrected:.1f}°  "
           f"C={C.round(3)}")
 
-    return K @ np.hstack([R_final, t.reshape(3, 1)])
+    return K @ np.hstack([R_world_to_cam, t.reshape(3, 1)])
