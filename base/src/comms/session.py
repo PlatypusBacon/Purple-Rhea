@@ -49,6 +49,9 @@ def _step_motor(chip: int, n_steps: int, phase: int = 0) -> int:
         else:
             next_t = time.perf_counter()
         phase = (phase + 1) % 8
+        seq = _STEP_SEQ[phase]
+        for pin, val in zip(_PINS, seq):
+            lgpio.gpio_write(chip, pin, val)
     return phase
 
 
