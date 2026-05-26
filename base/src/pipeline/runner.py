@@ -41,11 +41,6 @@ def run(session: ScanSession, on_progress=None) -> str:
     points_3d = compute_visual_hull(images, projections, grid_resolution=80)
     _progress(f"[3/5] Visual hull: {len(points_3d)} points")
 
-    # Save point cloud
-    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-    np.save(os.path.join(config.OUTPUT_DIR, "reconstruction_raw.npy"), points_3d)
-    np.save(os.path.join(config.OUTPUT_DIR, "projections.npy"), np.array(projections))
-
     # Export .obj
     point_path = os.path.join(config.POINT_DIR, "reconstruction.obj")
     from pipeline.export import write_obj
