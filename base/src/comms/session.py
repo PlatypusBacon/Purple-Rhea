@@ -173,7 +173,12 @@ def start_session(on_frame_captured=None) -> ScanSession:
         if len(data) < 4:
             print("  [MQTT] payload too short — discarding")
             return
-        waiter.set(data)
+        pose_len = data[0] | (data[1] << 8)
+        jpeg_start = 2 + pose_len
+        if jpeg_start >= len(data):
+            print("  [MQTT] no JPEG after pose prefix — discarding")
+            return
+        waiter.set(data[jpeg_start:])
 
     mqttc = mqtt.Client(client_id="rpi-scanner", protocol=mqtt.MQTTv311)
     mqttc.on_message = _on_message
