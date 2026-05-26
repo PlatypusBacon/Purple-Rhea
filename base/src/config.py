@@ -1,13 +1,13 @@
 # ── Scan geometry ──────────────────────────────────────────────────────────────
 TOTAL_FRAMES   = 36
 STEP_DEGREES   = 10.0
-NOMINAL_RADIUS = 0.20        # metres — fallback only, used if h computation fails
 
 # ── Rig physical constants (for compute_camera_distance formula) ───────────────
 RIG_BASE_LENGTH   = 0.13    # r — horizontal base length (metres)
 RIG_MIDDLE_LENGTH = 0.25    # x — middle segment length (metres)
 RIG_FINAL_LENGTH  = 0.09    # y — final segment length (metres)
-CAMERA_HEIGHT     = 0.12    # H — vertical height of camera above ground (metres)
+NOMINAL_RADIUS = 0.50    # measure this directly — tape from camera lens to turntable centre
+CAMERA_HEIGHT  = 0.28    # measure from camera lens down to turntable surface
 
 # ── Voxel grid bounds (used in visual_hull.py AND surface.py) ─────────────────
 VOXEL_XY_EXTENT = 0.12      # ±metres in XY — set to slightly more than object radius
@@ -21,7 +21,6 @@ MQTT_BROKER  = "10.133.32.146"
 MQTT_PORT    = 1883
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
-NOMINAL_RADIUS              = 0.20
 RUN_SURFACE_RECON           = True
 SURFACE_METHODS             = ["convex_hull"]#, "alpha", "poisson"]
 # Backward-compatible single-method fallback if SURFACE_METHODS is empty.
