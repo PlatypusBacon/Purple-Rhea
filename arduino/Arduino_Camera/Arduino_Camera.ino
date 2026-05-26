@@ -24,6 +24,29 @@ const int MAX_PAYLOAD = 60000;
 
 bool flash = true;
 
+// Tracker UART
+#define TRACKER_RX_PIN  14
+#define TRACKER_TX_PIN  15
+#define TRACKER_BAUD    115200
+
+HardwareSerial TrackerSerial(1);        // UART1
+static TrackerPose latest_pose = TrackerPose_init_zero;
+
+enum PoseRxState : uint8_t {
+    RX_WAIT_SOF = 0,
+    RX_WAIT_LEN_HI,
+    RX_WAIT_LEN_LO,
+    RX_WAIT_PAYLOAD,
+    RX_WAIT_EOF,
+};
+
+static PoseRxState pose_rx_state = RX_WAIT_SOF;
+static uint8_t  pose_rx_buf[TrackerPose_size];
+static uint16_t pose_rx_len = 0;
+static uint16_t pose_rx_idx = 0;
+static uint32_t pose_rx_last_byte_ms = 0;
+static const uint32_t POSE_RX_TIMEOUT_MS = 50;
+
 WiFiClient espClient;
 PubSubClient client(espClient);
 
@@ -40,20 +63,77 @@ void sendMQTT(const uint8_t* buf, uint32_t len) {
   }
 }
 
+static void reset_pose_rx() {
+    pose_rx_state = RX_WAIT_SOF;
+    pose_rx_len = 0;
+    pose_rx_idx = 0;
+}
+
 bool try_read_pose() {
-    if (!TrackerSerial.available()) return false;
-    if (TrackerSerial.read() != 0xAA) return false;
+    bool got_pose = false;
 
-    uint16_t len = ((uint16_t)TrackerSerial.read() << 8)
-                 |  (uint16_t)TrackerSerial.read();
-    if (len == 0 || len > TrackerPose_size) return false;
+    while (TrackerSerial.available()) {
+        int raw = TrackerSerial.read();
+        if (raw < 0) {
+            break;
+        }
+        uint8_t b = (uint8_t)raw;
 
-    uint8_t buf[TrackerPose_size];
-    if (TrackerSerial.readBytes(buf, len) < len) return false;
-    if (TrackerSerial.read() != 0x55) return false;
+        uint32_t now = millis();
+        if (pose_rx_state != RX_WAIT_SOF &&
+            (now - pose_rx_last_byte_ms) > POSE_RX_TIMEOUT_MS) {
+            reset_pose_rx();
+        }
+        pose_rx_last_byte_ms = now;
 
-    pb_istream_t stream = pb_istream_from_buffer(buf, len);
-    return pb_decode(&stream, TrackerPose_fields, &latest_pose);
+        switch (pose_rx_state) {
+            case RX_WAIT_SOF:
+                if (b == 0xAA) {
+                    pose_rx_state = RX_WAIT_LEN_HI;
+                }
+                break;
+
+            case RX_WAIT_LEN_HI:
+                pose_rx_len = ((uint16_t)b) << 8;
+                pose_rx_state = RX_WAIT_LEN_LO;
+                break;
+
+            case RX_WAIT_LEN_LO:
+                pose_rx_len |= (uint16_t)b;
+                if (pose_rx_len == 0 || pose_rx_len > TrackerPose_size) {
+                    reset_pose_rx();
+                } else {
+                    pose_rx_idx = 0;
+                    pose_rx_state = RX_WAIT_PAYLOAD;
+                }
+                break;
+
+            case RX_WAIT_PAYLOAD:
+                pose_rx_buf[pose_rx_idx++] = b;
+                if (pose_rx_idx >= pose_rx_len) {
+                    pose_rx_state = RX_WAIT_EOF;
+                }
+                break;
+
+            case RX_WAIT_EOF:
+                if (b == 0x55) {
+                    pb_istream_t stream = pb_istream_from_buffer(pose_rx_buf, pose_rx_len);
+                    if (pb_decode(&stream, TrackerPose_fields, &latest_pose)) {
+                        got_pose = true;
+                    }
+                }
+                if (b == 0xAA) {
+                    pose_rx_state = RX_WAIT_LEN_HI;
+                    pose_rx_len = 0;
+                    pose_rx_idx = 0;
+                } else {
+                    reset_pose_rx();
+                }
+                break;
+        }
+    }
+
+    return got_pose;
 }
 
 void take_picture() {
@@ -131,6 +211,9 @@ void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(true);
   Serial.println();
+  TrackerSerial.begin(TRACKER_BAUD, SERIAL_8N1, TRACKER_RX_PIN, TRACKER_TX_PIN);
+  Serial.printf("Tracker UART on RX=%d TX=%d @ %d\n",
+                TRACKER_RX_PIN, TRACKER_TX_PIN, TRACKER_BAUD);
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;

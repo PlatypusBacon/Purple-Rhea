@@ -8,6 +8,7 @@
 #include <pb_encode.h>
 #include <zephyr/drivers/uart.h>
 #include <stdio.h>
+#include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
@@ -83,6 +84,7 @@ void processing_thread_entry(void *p1, void *p2, void *p3)
 	int settle = 0;
 	bool yaw_zeroed = false;
 	int emit_counter = 0;
+	uint32_t frame_index = 0;
 
 	printk("STATUS:ready\n");
 
@@ -136,7 +138,7 @@ void processing_thread_entry(void *p1, void *p2, void *p3)
 			if (!r_valid) { r = 0.0f; }
 
 			/* Send proto over UART to ESP32-CAM */
-			send_pose_uart(roll, pitch, yaw, r, r_valid, emit_counter);
+			send_pose_uart(roll, pitch, yaw, r, r_valid, frame_index++);
 		}
 	}
 }
