@@ -16,9 +16,10 @@ import os
 import config
 
 
-FLOW_SUBSAMPLE   = 4
+FLOW_SUBSAMPLE   = 8
 REPROJ_THRESH_PX = 4.0
-PAIR_STEPS       = [3, 6]
+PAIR_STEPS       = [4]
+FLOW_SCALE       = 0.5
 DEBUG_DIR        = "output/depth_debug"
 
 
@@ -91,13 +92,15 @@ def _save_camera_centres(projections):
 
 
 def _process_pair(img1, img2, P1, P2, mask1, mask2, idx1, idx2):
-    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
-    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+    # Downscale for faster optical flow
+    s = FLOW_SCALE
+    small1 = cv2.resize(cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY), None, fx=s, fy=s)
+    small2 = cv2.resize(cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY), None, fx=s, fy=s)
 
-    flow = cv2.calcOpticalFlowFarneback(
-        gray1, gray2, None,
-        pyr_scale=0.5, levels=5, winsize=21,
-        iterations=5, poly_n=7, poly_sigma=1.5, flags=0,
+    flow_small = cv2.calcOpticalFlowFarneback(
+        small1, small2, None,
+        pyr_scale=0.5, levels=3, winsize=15,
+        iterations=3, poly_n=5, poly_sigma=1.2, flags=0,
     )
 
     h_img, w_img = mask1.shape
@@ -110,14 +113,15 @@ def _process_pair(img1, img2, P1, P2, mask1, mask2, idx1, idx2):
     step = max(1, FLOW_SUBSAMPLE)
     xs, ys = xs[::step], ys[::step]
 
-    dx = flow[ys, xs, 0]
-    dy = flow[ys, xs, 1]
+    # Sample flow at downscaled coords, scale back to full res
+    xs_s = np.clip((xs * s).astype(int), 0, small1.shape[1] - 1)
+    ys_s = np.clip((ys * s).astype(int), 0, small1.shape[0] - 1)
+    dx = flow_small[ys_s, xs_s, 0] / s
+    dy = flow_small[ys_s, xs_s, 1] / s
 
-    median_mag = np.median(np.sqrt(dx**2 + dy**2))
-    print(f"  pair {idx1:02d}-{idx2:02d}: median flow magnitude = {median_mag:.1f} px")
-
-    if config.DEBUG_VIZ:
-        _save_flow_debug(flow, mask1, img1, idx1, idx2)
+    if config.DEBUG_VIZ and idx1 == 0:
+        flow_full = cv2.resize(flow_small, (w_img, h_img)) / s
+        _save_flow_debug(flow_full, mask1, img1, idx1, idx2)
 
     xs2 = (xs + dx).astype(np.float64)
     ys2 = (ys + dy).astype(np.float64)
@@ -150,13 +154,7 @@ def _process_pair(img1, img2, P1, P2, mask1, mask2, idx1, idx2):
 
     colors = img1[ys_g.astype(int), xs_g.astype(int)]
 
-    if len(X3d) > 0:
-        dist_to_origin = np.linalg.norm(X3d, axis=1)
-        print(f"  pair {idx1:02d}-{idx2:02d}: {len(xs[good_w])} corr → {len(X3d)} pts  "
-              f"dist_to_origin=[{dist_to_origin.min():.4f}, {dist_to_origin.median() if False else np.median(dist_to_origin):.4f}, {dist_to_origin.max():.4f}]")
-    else:
-        print(f"  pair {idx1:02d}-{idx2:02d}: 0 points after reproj filter")
-
+    print(f"  pair {idx1:02d}-{idx2:02d}: {len(X3d)} pts")
     return X3d, colors
 
 
@@ -171,13 +169,14 @@ def _save_flow_debug(flow, mask, img, idx1, idx2):
     cv2.imwrite(os.path.join(DEBUG_DIR, f"flow_{idx1:02d}_{idx2:02d}.png"), flow_bgr)
 
 
+BRIGHTNESS_THRESH = 40
+
 def _project_disk_mask(img, P, frame_idx):
     """
-    Project the bounding cylinder of the object volume into the image:
-      - bottom ring: z = VOXEL_Z_MIN, radius = RIG_BASE_LENGTH
-      - top ring:    z = VOXEL_Z_MAX, radius = RIG_BASE_LENGTH
-    Fill the convex hull of all projected points as the mask.
-    This captures everything that could sit on the turntable.
+    Two-stage mask:
+      1. Geometric: project disk cylinder to get the region of interest
+      2. Appearance: within that region, keep only non-dark pixels
+         (the cube is colorful; the plate and background are dark)
     """
     h_img, w_img = img.shape[:2]
     R = config.RIG_BASE_LENGTH
@@ -210,13 +209,41 @@ def _project_disk_mask(img, P, frame_idx):
     pts_2d = np.stack([px, py], axis=1).astype(np.float32)
     hull = cv2.convexHull(pts_2d.reshape(-1, 1, 2))
 
+    geo_mask = np.zeros((h_img, w_img), dtype=np.uint8)
+    cv2.fillConvexPoly(geo_mask, hull.astype(np.int32), 255)
+
+    # Brightness filter: keep pixels that aren't dark
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    bright = (gray > BRIGHTNESS_THRESH).astype(np.uint8) * 255
+
+    # Also keep high-saturation pixels (colored cube faces can be dim but saturated)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    saturated = (hsv[:, :, 1] > 50).astype(np.uint8) * 255
+
+    appearance = cv2.bitwise_or(bright, saturated)
+
+    # Combine: must be inside geometry AND pass appearance
+    mask = cv2.bitwise_and(geo_mask, appearance)
+
+    # Dilate to bridge dark gaps between cube stickers
+    bridge = np.ones((15, 15), np.uint8)
+    dilated = cv2.dilate(mask, bridge, iterations=2)
+
+    # Find largest connected component and fill its convex hull
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     mask = np.zeros((h_img, w_img), dtype=np.uint8)
-    cv2.fillConvexPoly(mask, hull.astype(np.int32), 255)
+    if contours:
+        biggest = max(contours, key=cv2.contourArea)
+        hull = cv2.convexHull(biggest)
+        cv2.fillConvexPoly(mask, hull, 255)
+
+    # Re-intersect with geometry to stay within projected bounds
+    mask = cv2.bitwise_and(mask, geo_mask)
 
     mask_px = int(mask.sum() // 255)
-    print(f"  [mask {frame_idx:02d}] projected cylinder: "
-          f"hull {len(hull)} verts, "
-          f"covers {mask_px} px ({100*mask_px/(h_img*w_img):.1f}%)")
+    geo_px = int(geo_mask.sum() // 255)
+    print(f"  [mask {frame_idx:02d}] geo={geo_px}px → appearance={mask_px}px "
+          f"({100*mask_px/(h_img*w_img):.1f}% of image)")
 
     os.makedirs("output/silhouettes", exist_ok=True)
     cv2.imwrite(f"output/silhouettes/mask_{frame_idx:02d}.png", mask)
