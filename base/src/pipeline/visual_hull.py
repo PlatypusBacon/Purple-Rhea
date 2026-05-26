@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 import os
 import config
+import math
 
 # Minimum number of views that must carve a voxel for it to be removed.
 # Setting this to 1 (original behaviour) means any single bad mask can delete
