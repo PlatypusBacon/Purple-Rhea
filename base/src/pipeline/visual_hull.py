@@ -160,113 +160,65 @@ def _build_mask(img: np.ndarray, frame_idx: int = 0) -> np.ndarray:
         plate_mask = _fallback_ellipse(gray)
 
     # ------------------------------------------------------------------ #
-    # Stage 2: Within plate, isolate ONLY the cube                        #
-    # The plate surface is dark (low value). The cube is bright/coloured. #
-    # Simply threshold: dark = plate surface = background                 #
+    # Stage 2: Erode plate mask slightly to exclude the rim, then return #
+    # The plate circle IS the silhouette — everything outside is          #
+    # background. Visual hull carving across views removes the flat       #
+    # plate surface, leaving only the object.                             #
     # ------------------------------------------------------------------ #
+    erode_k = np.ones((15, 15), np.uint8)
+    mask = cv2.erode(plate_mask, erode_k, iterations=1)
+    final_px = int(mask.sum() // 255)
+    print(f"  [mask {frame_idx:02d}] final plate mask: {final_px} px")
 
-    # Erode the plate mask to strip the bright metallic rim and push the
-    # boundary away from the white wall visible behind the plate edge.
-    erode_k = np.ones((45, 45), np.uint8)
-    plate_interior = cv2.erode(plate_mask, erode_k, iterations=1)
-
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    L   = lab[:, :, 0]
-
-    # Bright but not TOO bright: wall behind plate is L > 190
-    cube_bright = cv2.inRange(L, 80, 190)
-
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    coloured = cv2.inRange(hsv, (0, 60, 40), (180, 255, 255))
-    # Exclude near-white saturated pixels (wall can have slight color cast)
-    coloured = cv2.bitwise_and(coloured, cv2.bitwise_not(cv2.inRange(L, 190, 255)))
-
-    cube_px = cv2.bitwise_or(cube_bright, coloured)
-    cube_px = cv2.bitwise_and(cube_px, plate_interior)
-    
-    roi_px = int(cube_px.sum() // 255)
-    print(f"  [mask {frame_idx:02d}] cube pixels inside plate: {roi_px}")
-    
-    if roi_px < 500:
-        print(f"  [WARN mask {frame_idx:02d}] too few cube pixels — returning plate mask")
-        return plate_mask
-
-    # ------------------------------------------------------------------ #
-    # Stage 3: Morphological close to fill the cube silhouette            #
-    # ------------------------------------------------------------------ #
-    kernel_close  = np.ones((25, 25), np.uint8)
-    kernel_dilate = np.ones((10, 10), np.uint8)
-    cube_px = cv2.dilate(cube_px, kernel_dilate, iterations=2)
-    cube_px = cv2.morphologyEx(cube_px, cv2.MORPH_CLOSE, kernel_close)
-
-    # ------------------------------------------------------------------ #
-    # Stage 4: Largest connected component only                           #
-    # ------------------------------------------------------------------ #
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(cube_px)
-    if n > 1:
-        largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        cube_px = (labels == largest).astype(np.uint8) * 255
-        final_px = int(cube_px.sum() // 255)
-        print(f"  [mask {frame_idx:02d}] final cube mask: {final_px} px")
-    else:
-        print(f"  [mask {frame_idx:02d}] no components — falling back to plate mask")
-        return plate_mask
-
-    return cube_px
+    return mask
 
 
 def _detect_plate_mask(img: np.ndarray, gray: np.ndarray, frame_idx: int) -> np.ndarray:
     h, w = gray.shape
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    L = lab[:, :, 0]
 
-    blurred = cv2.GaussianBlur(gray, (9, 9), 2)
-    edges = cv2.Canny(blurred, threshold1=20, threshold2=80)
-    edges = cv2.dilate(edges, np.ones((7, 7), np.uint8), iterations=2)
-
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    blurred = cv2.GaussianBlur(gray, (15, 15), 3)
+    circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=1.5,
+                               minDist=200, param1=80, param2=50,
+                               minRadius=int(w * 0.25), maxRadius=int(w * 0.55))
 
     best_mask = None
     best_score = 0
 
-    for cnt in (contours or []):
-        area = cv2.contourArea(cnt)
-        if area < (h * w * 0.02) or len(cnt) < 5:
-            continue
-        try:
-            ellipse = cv2.fitEllipse(cnt)
-        except cv2.error:
-            continue
+    if circles is not None:
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        L = lab[:, :, 0]
 
-        (ex, ey), (ea, eb), angle = ellipse
-        if min(ea, eb) < 1:
-            continue
-        if max(ea, eb) / min(ea, eb) > 6.0:
-            continue
-        if ey < h * 0.35:
-            continue
+        for cx, cy, r in circles[0]:
+            # Plate centre is below the image midpoint (we see the top of the plate)
+            if cy < h * 0.45:
+                continue
+            # The visible arc should be in the image
+            arc_top = cy - r
+            if arc_top < 0 or arc_top > h * 0.55:
+                continue
 
-        perimeter = cv2.arcLength(cnt, True)
-        if perimeter < 1:
-            continue
-        circularity = 4 * math.pi * area / (perimeter ** 2)
+            test_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.circle(test_mask, (int(cx), int(cy)), int(r), 255, -1)
+            median_L = float(np.median(L[test_mask > 0]))
+            # Plate interior should be dark (not a wall or rig arm circle)
+            if median_L > 130:
+                continue
 
-        cx_norm = abs(ex / w - 0.5)
-        score = area * (circularity ** 2) * (1.2 - cx_norm)
+            cx_norm = abs(cx / w - 0.5)
+            score = r * (1.2 - cx_norm) * max(1.0, 130 - median_L)
 
-        print(f"  [plate {frame_idx:02d}] candidate: "
-              f"centre=({ex:.0f},{ey:.0f}) axes=({ea:.0f},{eb:.0f}) "
-              f"circ={circularity:.3f} score={score:.0f}")
+            print(f"  [plate {frame_idx:02d}] circle: "
+                  f"centre=({cx:.0f},{cy:.0f}) r={r:.0f} "
+                  f"medL={median_L:.0f} score={score:.0f}")
 
-        if score > best_score:
-            best_score = score
-            best_mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.ellipse(best_mask, ellipse, 255, -1)
+            if score > best_score:
+                best_score = score
+                best_mask = test_mask
 
     if best_mask is not None:
         return best_mask
 
-    print(f"  [plate {frame_idx:02d}] no valid ellipse — using fallback")
+    print(f"  [plate {frame_idx:02d}] no valid circle — using fallback")
     return _fallback_ellipse(gray)
 
 

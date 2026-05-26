@@ -9,11 +9,11 @@
 #include "board_config.h"
 
 // WiFi credentials
-const char *ssid = "Martinez Mobile Memorial ";
-const char *password = "bilepacling";
+const char *ssid = "Jgggggg";
+const char *password = "Jg200311";
 
 // MQTT config
-const char* mqttServer = "10.48.233.146";
+const char* mqttServer = "10.133.32.146";
 const char* HostName = "ESP32-CAM";
 const char* mqttUser = "47484333";
 const char* mqttPassword = "47484333";
