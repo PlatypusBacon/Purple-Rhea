@@ -19,167 +19,136 @@ import math
 import config
 
 
+# --------------------------------------------------------------------------- #
+#  Rig geometry                                                                #
+# --------------------------------------------------------------------------- #
+
+def compute_camera_distance(pitch_deg: float) -> float | None:
+    """
+    Compute 3D slant distance h from camera to turntable centre.
+
+        h = sqrt((r + y·cos θ + sqrt(x² - (H - y·sin θ)²))² + H²)
+
+    pitch_deg — IMU pitch (positive = tilting down toward centre)
+    Returns None if inner sqrt argument is negative (physically inconsistent
+    rig constants for this angle) — caller should fall back to NOMINAL_RADIUS.
+    """
+    theta = math.radians(pitch_deg)
+
+    r = config.RIG_BASE_LENGTH
+    x = config.RIG_MIDDLE_LENGTH
+    y = config.RIG_FINAL_LENGTH
+    H = config.CAMERA_HEIGHT
+
+    inner = x**2 - (H - y * math.sin(theta))**2
+    if inner < 0:
+        return None
+
+    horizontal = r + y * math.cos(theta) + math.sqrt(inner)
+    return math.sqrt(horizontal**2 + H**2)
+
+
+# --------------------------------------------------------------------------- #
+#  Public entry point                                                          #
+# --------------------------------------------------------------------------- #
+
 def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[np.ndarray]:
     """
     Two modes:
-      - If matches and keypoints provided: recover poses from Essential matrix (accurate)
-      - Otherwise: build from known servo angles (used only when intrinsics are calibrated)
+      - matches + keypoints provided → PnP from frame-0 anchor (accurate)
+      - neither provided             → synthesised from servo/IMU angles
     """
     K = _camera_intrinsics()
-    
+
     if matches is not None and keypoints_per_frame is not None:
         return _recover_projections_pnp(frames, matches, keypoints_per_frame, K)
-    
-    # Fallback: synthesised from servo angle
+
     projections = []
     for frame in frames:
         pose = frame.pose
-        print(f"  frame {frame.index:02d}: yaw={pose.yaw:.1f}°  xy={pose.xy_position}  C=[{pose.xy_position[0]:.4f}, {pose.xy_position[1]:.4f}, {pose.z_position:.4f}]")
+        servo_rad = math.radians(pose.servo_angle_deg)
+        h   = pose.radius
+        H   = config.CAMERA_HEIGHT
+        horiz = math.sqrt(max(h**2 - H**2, 0.0))
+        print(f"  frame {frame.index:02d}: "
+              f"servo={pose.servo_angle_deg:.1f}°  "
+              f"imu_yaw={pose.imu_yaw_deg:.1f}°  "
+              f"h={h:.4f}m  horiz={horiz:.4f}m  "
+              f"C=[{horiz * math.sin(servo_rad):.4f}, "
+              f"{horiz * math.cos(servo_rad):.4f}, "
+              f"{H:.4f}]")
         P = _projection_for_pose(pose, K)
         projections.append(P)
-        R = frame.pose.as_rotation_matrix()
-        # The third column of R is the camera's look direction in world space
-        look = R[:, 2]  
+        look = frame.pose.as_rotation_matrix()[:, 2]
         print(f"  frame {frame.index:02d}: look direction = {look.round(3)}")
     return projections
+
+
+# --------------------------------------------------------------------------- #
+#  PnP pose recovery                                                           #
+# --------------------------------------------------------------------------- #
 
 def _recover_projections_pnp(frames, matches, keypoints_per_frame, K):
     """
     Frame 0 = identity anchor.
     Triangulate frame 0 vs each other frame directly,
-    then use solvePnPRansac to get metric pose.
-    """
-    import cv2
-    n = len(frames)
-    projections = [None] * n
-    
-    R0, t0 = np.eye(3), np.zeros((3,1))
-    projections[0] = K @ np.hstack([R0, t0])
-    
-    for i in range(1, n):
-        key = (0, i) if (0, i) in matches else None
-        if key is None:
-            projections[i] = projections[i-1]
-            continue
-        
-        dmatches = matches[key]
-        kps_0 = keypoints_per_frame[0]
-        kps_i = keypoints_per_frame[i]
-        
-        pts_0 = np.float32([kps_0[m.queryIdx].pt for m in dmatches])
-        pts_i = np.float32([kps_i[m.trainIdx].pt for m in dmatches])
-        
-        # Triangulate against frame 0 (known pose) → metric 3D points
-        X4d = cv2.triangulatePoints(projections[0], 
-                                     K @ np.hstack([np.eye(3), np.zeros((3,1))]),
-                                     pts_0.T, pts_i.T)
-        X3d = (X4d[:3] / X4d[3]).T  # (M, 3)
-        
-        # PnP: recover pose of frame i from 3D↔2D correspondences
-        ok, rvec, tvec, inliers = cv2.solvePnPRansac(
-            X3d, pts_i, K, None,
-            iterationsCount=1000, reprojectionError=2.0
-        )
-        if not ok or inliers is None or len(inliers) < 6:
-            projections[i] = projections[i-1]
-            continue
-        
-        R, _ = cv2.Rodrigues(rvec)
-        projections[i] = K @ np.hstack([R, tvec])
-        print(f"    frame {i:02d}: PnP from frame 00  ({len(inliers)} inliers)")
-    
-    return projections
-
-def _recover_projections(frames, matches, keypoints_per_frame, K) -> list[np.ndarray]:
-    """
-    Recover camera poses incrementally from matched keypoints.
-    Frame 0 is fixed at the world origin facing +Z.
-    Each subsequent frame's pose is recovered from its matches against
-    the best-connected already-placed frame.
+    then use solvePnPRansac to place every frame independently in the
+    same metric coordinate system. No error accumulation across frames.
     """
     import cv2
     n = len(frames)
     projections = [None] * n
 
-    # Frame 0: identity — world origin
-    R0 = np.eye(3)
-    t0 = np.zeros((3, 1))
+    R0, t0 = np.eye(3), np.zeros((3, 1))
     projections[0] = K @ np.hstack([R0, t0])
     print(f"    frame 00: identity (anchor)")
 
-    placed = {0}
-
-    # Build adjacency: for each unplaced frame, find best match to a placed frame
-    for _ in range(n - 1):
-        best_pair = None
-        best_count = 0
-
-        for (i, j), dmatches in matches.items():
-            if i in placed and j not in placed:
-                candidate = (i, j, False)
-            elif j in placed and i not in placed:
-                candidate = (j, i, True)  # swapped
-            else:
-                continue
-
-            if len(dmatches) > best_count:
-                best_count = len(dmatches)
-                best_pair = candidate
-
-        if best_pair is None:
-            break
-
-        placed_idx, new_idx, swapped = best_pair
-        key = (min(placed_idx, new_idx), max(placed_idx, new_idx))
-        dmatches = matches[key]
-
-        i_key, j_key = min(placed_idx, new_idx), max(placed_idx, new_idx)
-        kps_i = keypoints_per_frame[i_key]
-        kps_j = keypoints_per_frame[j_key]
-
-        pts_placed = np.float32([kps_i[m.queryIdx].pt for m in dmatches])
-        pts_new    = np.float32([kps_j[m.trainIdx].pt for m in dmatches])
-
-        if swapped:
-            pts_placed, pts_new = pts_new, pts_placed
-
-        E, mask = cv2.findEssentialMat(pts_placed, pts_new, K,
-                                        method=cv2.RANSAC, prob=0.999, threshold=1.0)
-        if E is None:
-            print(f"    frame {new_idx:02d}: Essential matrix failed — skipping")
-            projections[new_idx] = projections[placed_idx]  # fallback
-            placed.add(new_idx)
+    for i in range(1, n):
+        key = (0, i) if (0, i) in matches else None
+        if key is None:
+            projections[i] = projections[i - 1]
+            print(f"    frame {i:02d}: no match to frame 00 — copied from frame {i-1:02d}")
             continue
 
-        _, R, t, _ = cv2.recoverPose(E, pts_placed, pts_new, K, mask=mask)
+        dmatches  = matches[key]
+        kps_0     = keypoints_per_frame[0]
+        kps_i     = keypoints_per_frame[i]
 
-        # Chain: new pose = placed_pose composed with recovered R, t
-        P_placed = projections[placed_idx]
-        R_placed = P_placed[:, :3]   # approximation — proper decomp below
-        
-        # Decompose placed projection to get R_prev, t_prev
-        R_prev, t_prev = _decompose_projection(P_placed, K)
-        R_new = R @ R_prev
-        t_new = R @ t_prev + t
-        projections[new_idx] = K @ np.hstack([R_new, t_new])
-        placed.add(new_idx)
-        print(f"    frame {new_idx:02d}: recovered from frame {placed_idx:02d}  ({len(dmatches)} matches)")
+        pts_0 = np.float32([kps_0[m.queryIdx].pt for m in dmatches])
+        pts_i = np.float32([kps_i[m.trainIdx].pt for m in dmatches])
 
-    # Fill any unplaced frames with their neighbour's projection
-    for i in range(n):
-        if projections[i] is None:
+        # Triangulate against frame 0 → metric 3D points
+        P_init = K @ np.hstack([np.eye(3), np.zeros((3, 1))])
+        X4d = cv2.triangulatePoints(projections[0], P_init, pts_0.T, pts_i.T)
+        X3d = (X4d[:3] / X4d[3]).T  # (M, 3)
+
+        # PnP: place frame i from 3D↔2D correspondences
+        ok, rvec, tvec, inliers = cv2.solvePnPRansac(
+            X3d, pts_i, K, None,
+            iterationsCount=1000, reprojectionError=2.0,
+        )
+        if not ok or inliers is None or len(inliers) < 6:
             projections[i] = projections[i - 1]
-            print(f"    frame {i:02d}: no matches found — copied from frame {i-1:02d}")
+            print(f"    frame {i:02d}: PnP failed ({len(inliers) if inliers is not None else 0} inliers)"
+                  f" — copied from frame {i-1:02d}")
+            continue
+
+        R, _ = cv2.Rodrigues(rvec)
+        projections[i] = K @ np.hstack([R, tvec])
+        print(f"    frame {i:02d}: PnP from frame 00  ({len(inliers)} inliers)")
 
     return projections
 
 
+# --------------------------------------------------------------------------- #
+#  Decompose projection (utility)                                              #
+# --------------------------------------------------------------------------- #
+
 def _decompose_projection(P: np.ndarray, K: np.ndarray):
     """Extract R, t from a projection matrix P = K[R|t]."""
-    Rt = np.linalg.inv(K) @ P   # 3×4
-    R = Rt[:, :3]
-    t = Rt[:, 3:4]
-    # Enforce valid rotation via SVD
+    Rt = np.linalg.inv(K) @ P
+    R  = Rt[:, :3]
+    t  = Rt[:, 3:4]
     U, _, Vt = np.linalg.svd(R)
     R = U @ Vt
     if np.linalg.det(R) < 0:
@@ -194,20 +163,15 @@ def _decompose_projection(P: np.ndarray, K: np.ndarray):
 
 def _camera_intrinsics() -> np.ndarray:
     """
-    3x3 intrinsic matrix K for the OV2640 on the ESP32-CAM.
-
-    fx, fy : focal lengths in pixels
-    cx, cy : principal point (image centre)
-
+    3×3 intrinsic matrix K for the OV2640 on the ESP32-CAM.
+    fx/fy in pixels; principal point at image centre.
+    Replace fx with your calibrated value.
     """
     w, h = config.IMAGE_WIDTH, config.IMAGE_HEIGHT
-
-    fx = 600.0  # ← your measured value here
-    fy = fx     # square pixels assumed
-
-    cx = w / 2.0
-    cy = h / 2.0
-
+    fx   = 600.0   # ← replace with calibrated value
+    fy   = fx      # square pixels assumed
+    cx   = w / 2.0
+    cy   = h / 2.0
     return np.array([
         [fx,  0, cx],
         [ 0, fy, cy],
@@ -216,7 +180,7 @@ def _camera_intrinsics() -> np.ndarray:
 
 
 # Radial/tangential distortion coefficients [k1, k2, p1, p2, k3]
-# Zero until a proper calibration is done.
+# Zero until proper calibration is done.
 DIST_COEFFS = np.zeros(5, dtype=np.float64)
 
 
@@ -225,29 +189,49 @@ DIST_COEFFS = np.zeros(5, dtype=np.float64)
 # --------------------------------------------------------------------------- #
 
 def _projection_for_pose(pose, K: np.ndarray) -> np.ndarray:
-    angle_rad = math.radians(pose.yaw)
-    r = config.NOMINAL_RADIUS
-    z = pose.z_position
+    servo_rad = math.radians(pose.servo_angle_deg)
+    h     = pose.radius
+    H     = config.CAMERA_HEIGHT
+    horiz = math.sqrt(max(h**2 - H**2, 0.0))
 
-    # Camera position
-    C = np.array([r * math.sin(angle_rad),
-                  r * math.cos(angle_rad),
-                  z], dtype=np.float64)
+    C = np.array([
+        horiz * math.sin(servo_rad),
+        horiz * math.cos(servo_rad),
+        H,
+    ], dtype=np.float64)
 
-    # Build R directly here, bypassing as_rotation_matrix entirely
-    forward = -C / np.linalg.norm(C)          # toward origin
+    # Nominal inward-pointing orientation (world → camera)
+    forward  = -C / np.linalg.norm(C)
     world_up = np.array([0., 0., 1.])
-    right = np.cross(forward, world_up)
-    right /= np.linalg.norm(right)
-    down = np.cross(right, forward)
-    down /= np.linalg.norm(down)
-    R = np.column_stack([right, down, forward])
+    right    = np.cross(forward, world_up)
+    right   /= np.linalg.norm(right)
+    down     = np.cross(right, forward)
+    down    /= np.linalg.norm(down)
+    R_world_to_cam = np.column_stack([right, down, forward]).T
 
-    # Verify depth to origin
-    origin_depth = (R @ -C)[2]
-    print(f"    yaw={pose.yaw:.0f}° origin_depth={origin_depth:.4f}  C={C.round(3)}")
+    # IMU correction in camera body frame — post-multiply (intrinsic rotations)
+    # Order: roll first, then pitch, then yaw (X → Y → Z in camera frame)
+    dy = math.radians(pose.imu_yaw_corrected)
+    dp = math.radians(pose.imu_pitch_deg)
+    dr = math.radians(pose.imu_roll_deg)
 
-    R_world_to_cam = R.T   # or equivalently np.row_stack([right, down, forward])
+    Rz = np.array([[ math.cos(dy), -math.sin(dy), 0],
+                   [ math.sin(dy),  math.cos(dy), 0],
+                   [ 0,             0,             1]])
+    Ry = np.array([[ math.cos(dp), 0, math.sin(dp)],
+                   [ 0,            1, 0            ],
+                   [-math.sin(dp), 0, math.cos(dp)]])
+    Rx = np.array([[1, 0,             0            ],
+                   [0, math.cos(dr), -math.sin(dr) ],
+                   [0, math.sin(dr),  math.cos(dr) ]])
 
-    t = -R_world_to_cam @ C
-    return K @ np.hstack([R_world_to_cam, t.reshape(3, 1)])
+    # Post-multiply: correction applied in camera frame axes
+    R_final = R_world_to_cam @ (Rx @ Ry @ Rz)
+    t = -R_final @ C
+
+    print(f"    servo={pose.servo_angle_deg:.0f}°  "
+          f"h={h:.4f}m  horiz={horiz:.4f}m  "
+          f"imu_yaw_corr={pose.imu_yaw_corrected:.1f}°  "
+          f"C={C.round(3)}")
+
+    return K @ np.hstack([R_final, t.reshape(3, 1)])
