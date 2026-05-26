@@ -65,7 +65,7 @@ def compute_visual_hull(images, projections, grid_resolution=80):
         depth = proj[:, 2]
 
         # Only project voxels in front of camera
-        valid = depth > 0
+        valid = depth > 0.02
         safe  = np.where(valid, depth, 1.0)
         px = (proj[:, 0] / safe).astype(int)
         py = (proj[:, 1] / safe).astype(int)
@@ -179,74 +179,225 @@ def _project_plate_mask(img: np.ndarray, P: np.ndarray, frame_idx: int) -> np.nd
     
     return mask
 
+def _build_plate_mask(img: np.ndarray, P: np.ndarray, frame_idx: int) -> np.ndarray:
+    """
+    Fuse projected plate geometry with white-rim detection to get a clean plate ROI.
+    
+    1. Project physical plate circle → expected centre + radius in pixels
+    2. Search for bright rim pixels in an annular band around the projection
+    3. Fit ellipse to rim inliers (if enough found)
+    4. Fill solid ellipse as the plate mask
+    5. Fall back to projected circle if rim detection fails
+    """
+    h, w = img.shape[:2]
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    val_ch = hsv[:, :, 2]
+    sat_ch = hsv[:, :, 1]
+
+    # ------------------------------------------------------------------ #
+    # STEP 1: Project the physical plate circle to get prior              #
+    # ------------------------------------------------------------------ #
+    plate_radius = config.RIG_BASE_LENGTH  # physical radius in metres
+    n_pts = 360
+    angles = np.linspace(0, 2 * np.pi, n_pts)
+    circle_3d = np.array([
+        [plate_radius * np.cos(a), plate_radius * np.sin(a), 0.0, 1.0]
+        for a in angles
+    ])  # (360, 4)
+
+    proj = (P @ circle_3d.T).T   # (360, 3)
+    depth = proj[:, 2]
+    valid = depth > 0
+
+    if valid.sum() < 10:
+        print(f"  [plate {frame_idx:02d}] projection mostly behind camera — pure fallback ellipse")
+        return _fallback_ellipse(img)
+
+    safe_depth = np.where(valid, depth, 1.0)
+    px_proj = (proj[:, 0] / safe_depth)
+    py_proj = (proj[:, 1] / safe_depth)
+
+    # Estimate projected centre and radius from the projected points
+    valid_px = px_proj[valid]
+    valid_py = py_proj[valid]
+    prior_cx = float(np.mean(valid_px))
+    prior_cy = float(np.mean(valid_py))
+    # Radius = mean distance of projected rim points from projected centre
+    dists = np.sqrt((valid_px - prior_cx)**2 + (valid_py - prior_cy)**2)
+    prior_r = float(np.mean(dists))
+
+    print(f"  [plate {frame_idx:02d}] projected prior: "
+          f"centre=({prior_cx:.1f},{prior_cy:.1f}) r={prior_r:.1f}px")
+
+    # ------------------------------------------------------------------ #
+    # STEP 2: Find white rim pixels in annular band around prior          #
+    # The physical rim is bright (high val) and low saturation            #
+    # Search band: prior_r * [0.70, 1.30]                                 #
+    # ------------------------------------------------------------------ #
+    band_inner = prior_r * 0.70
+    band_outer = prior_r * 1.30
+
+    # Distance from prior centre for every pixel
+    yy, xx = np.mgrid[0:h, 0:w]
+    dist_from_prior = np.sqrt((xx - prior_cx)**2 + (yy - prior_cy)**2)
+
+    in_band = (dist_from_prior >= band_inner) & (dist_from_prior <= band_outer)
+
+    # White rim: bright + desaturated
+    is_rim = (val_ch > 160) & (sat_ch < 60)
+
+    rim_pixels = in_band & is_rim
+
+    rim_ys, rim_xs = np.where(rim_pixels)
+    n_rim = len(rim_xs)
+    print(f"  [plate {frame_idx:02d}] rim pixels in band: {n_rim}")
+
+    # ------------------------------------------------------------------ #
+    # STEP 3: Fit ellipse to rim inliers (need ≥ 20 pixels)              #
+    # ------------------------------------------------------------------ #
+    use_projection = False
+    fitted_ellipse = None
+
+    if n_rim >= 20:
+        rim_points = np.column_stack([rim_xs, rim_ys]).astype(np.float32)
+
+        try:
+            # fitEllipse needs (N,1,2) contour format
+            ellipse = cv2.fitEllipse(rim_points.reshape(-1, 1, 2).astype(np.int32))
+            (ex, ey), (ea, eb), angle = ellipse
+
+            # Sanity checks against prior
+            fitted_r = (ea + eb) / 4.0  # mean semi-axis
+            centre_offset = np.sqrt((ex - prior_cx)**2 + (ey - prior_cy)**2)
+            r_ratio = fitted_r / prior_r if prior_r > 0 else 0
+
+            print(f"  [plate {frame_idx:02d}] fitted ellipse: "
+                  f"centre=({ex:.1f},{ey:.1f}) axes=({ea:.1f},{eb:.1f}) "
+                  f"offset={centre_offset:.1f}px r_ratio={r_ratio:.2f}")
+
+            if centre_offset < prior_r * 0.4 and 0.6 < r_ratio < 1.5:
+                fitted_ellipse = ellipse
+                print(f"  [plate {frame_idx:02d}] using FITTED ellipse")
+            else:
+                print(f"  [plate {frame_idx:02d}] fitted ellipse failed sanity check — using projection")
+                use_projection = True
+        except cv2.error as e:
+            print(f"  [plate {frame_idx:02d}] fitEllipse failed ({e}) — using projection")
+            use_projection = True
+    else:
+        print(f"  [plate {frame_idx:02d}] too few rim pixels ({n_rim}) — using projection")
+        use_projection = True
+
+    # ------------------------------------------------------------------ #
+    # STEP 4: Build plate mask                                            #
+    # ------------------------------------------------------------------ #
+    mask = np.zeros((h, w), dtype=np.uint8)
+
+    if fitted_ellipse is not None:
+        (ex, ey), (ea, eb), angle = fitted_ellipse
+        # Add 5% margin so we don't clip the plate edge
+        cv2.ellipse(mask, (int(ex), int(ey)),
+                    (int(ea * 0.55), int(eb * 0.55)),
+                    angle, 0, 360, 255, -1)
+    else:
+        # Fall back: use projected points directly — clamp to image
+        pts = np.column_stack([
+            np.clip(valid_px, 0, w - 1),
+            np.clip(valid_py, 0, h - 1)
+        ]).astype(np.int32)
+
+        if len(pts) >= 5:
+            try:
+                ellipse = cv2.fitEllipse(pts.reshape(-1, 1, 2))
+                (ex, ey), (ea, eb), angle = ellipse
+                cv2.ellipse(mask, (int(ex), int(ey)),
+                            (int(ea * 0.55), int(eb * 0.55)),
+                            angle, 0, 360, 255, -1)
+                print(f"  [plate {frame_idx:02d}] projection fallback ellipse: "
+                      f"centre=({ex:.1f},{ey:.1f}) axes=({ea:.1f},{eb:.1f})")
+            except cv2.error:
+                # Last resort: draw circle at prior centre/radius
+                cv2.circle(mask, (int(prior_cx), int(prior_cy)), int(prior_r * 1.05), 255, -1)
+                print(f"  [plate {frame_idx:02d}] last resort: circle at prior")
+        else:
+            cv2.circle(mask, (int(prior_cx), int(prior_cy)), int(prior_r * 1.05), 255, -1)
+
+    px_count = int((mask > 0).sum())
+    print(f"  [plate {frame_idx:02d}] plate mask: {px_count}px ({100*px_count/mask.size:.1f}%)")
+
+    if frame_idx < 6 or frame_idx % 6 == 0:
+        os.makedirs("output/silhouettes", exist_ok=True)
+        # Visualise: prior circle + rim pixels + final mask
+        vis = img.copy()
+        vis[rim_pixels] = (0, 255, 255)          # yellow = rim pixels found
+        cv2.circle(vis, (int(prior_cx), int(prior_cy)),
+                   int(prior_r), (0, 255, 0), 2)  # green = projected prior
+        cv2.circle(vis, (int(prior_cx), int(prior_cy)),
+                   int(band_inner), (128, 128, 0), 1)
+        cv2.circle(vis, (int(prior_cx), int(prior_cy)),
+                   int(band_outer), (128, 128, 0), 1)
+        contour_mask = mask.copy()
+        vis[contour_mask == 0] = (vis[contour_mask == 0] * 0.4).astype(np.uint8)
+        cv2.imwrite(f"output/silhouettes/plate_vis_{frame_idx:02d}.jpg", vis)
+        cv2.imwrite(f"output/silhouettes/plate_mask_{frame_idx:02d}.png", mask)
+
+    return mask
+
+
 def _build_mask(img: np.ndarray, P: np.ndarray, frame_idx: int = 0) -> np.ndarray:
     h_img, w_img = img.shape[:2]
-    gray = _to_gray(img)
-
-    plate_mask = _project_plate_mask(img, P, frame_idx)
-    plate_px = int(plate_mask.sum() // 255)
-    print(f"  [mask {frame_idx:02d}] plate mask covers {plate_px} px "
-          f"({100*plate_px/plate_mask.size:.1f}% of image)")
-
-    if plate_px < 1000:
-        print(f"  [WARN mask {frame_idx:02d}] projected plate mask too small — "
-              f"falling back to centre ellipse")
-        plate_mask = _fallback_ellipse(gray)
-
-    # ------------------------------------------------------------------ #
-    # Stage 2: Within plate, isolate ONLY the cube                        #
-    # The plate surface is dark (low value). The cube is bright/coloured. #
-    # Simply threshold: dark = plate surface = background                 #
-    # ------------------------------------------------------------------ #
-
-    # Erode the plate mask to strip the bright metallic rim and push the
-    # boundary away from the white wall visible behind the plate edge.
-    erode_k = np.ones((45, 45), np.uint8)
-    plate_interior = cv2.erode(plate_mask, erode_k, iterations=1)
-
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    L   = lab[:, :, 0]
-
-    # Bright but not TOO bright: wall behind plate is L > 190
-    cube_bright = cv2.inRange(L, 55, 190)
-
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    coloured = cv2.inRange(hsv, (0, 60, 40), (180, 255, 255))
-    # Exclude near-white saturated pixels (wall can have slight color cast)
-    coloured = cv2.bitwise_and(coloured, cv2.bitwise_not(cv2.inRange(L, 190, 255)))
+    val_ch = hsv[:, :, 2]
+    sat_ch = hsv[:, :, 1]
 
-    cube_px = cv2.bitwise_or(cube_bright, coloured)
-    cube_px = cv2.bitwise_and(cube_px, plate_interior)
-    
-    roi_px = int(cube_px.sum() // 255)
-    print(f"  [mask {frame_idx:02d}] cube pixels inside plate: {roi_px}")
-    
-    if roi_px < 500:
-        print(f"  [WARN mask {frame_idx:02d}] too few cube pixels — returning plate mask")
-        return plate_mask
+    # Get plate ROI using fused projection + rim detection
+    plate_mask = _build_plate_mask(img, P, frame_idx)
 
     # ------------------------------------------------------------------ #
-    # Stage 3: Morphological close to fill the cube silhouette            #
+    # Detect cube pixels within plate ROI                                 #
+    # Cube: saturated stickers OR bright white stickers                   #
     # ------------------------------------------------------------------ #
-    kernel_close  = np.ones((25, 25), np.uint8)
-    kernel_dilate = np.ones((10, 10), np.uint8)
-    cube_px = cv2.dilate(cube_px, kernel_dilate, iterations=2)
-    cube_px = cv2.morphologyEx(cube_px, cv2.MORPH_CLOSE, kernel_close)
+    high_sat   = (sat_ch > 70).astype(np.uint8) * 255
+    bright_white = ((val_ch > 160) & (sat_ch < 60)).astype(np.uint8) * 255
+    cube_raw   = cv2.bitwise_or(high_sat, bright_white)
+    cube_in_roi = cv2.bitwise_and(cube_raw, plate_mask)
 
-    # ------------------------------------------------------------------ #
-    # Stage 4: Largest connected component only                           #
-    # ------------------------------------------------------------------ #
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(cube_px)
-    if n > 1:
-        largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        cube_px = (labels == largest).astype(np.uint8) * 255
-        final_px = int(cube_px.sum() // 255)
-        print(f"  [mask {frame_idx:02d}] final cube mask: {final_px} px")
+    # Close to bridge black grid lines between stickers
+    close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
+    cube_closed = cv2.morphologyEx(cube_in_roi, cv2.MORPH_CLOSE, close_k)
+
+    # Open to remove isolated speckle
+    open_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    cube_clean = cv2.morphologyEx(cube_closed, cv2.MORPH_OPEN, open_k)
+
+    # Keep largest connected component(s) only
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(cube_clean, connectivity=8)
+    final_mask = np.zeros((h_img, w_img), dtype=np.uint8)
+
+    if n_labels > 1:
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        largest_area = float(np.max(areas))
+        for lbl in range(1, n_labels):
+            if stats[lbl, cv2.CC_STAT_AREA] >= largest_area * 0.15:
+                final_mask[labels == lbl] = 255
+
+        merge_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+        final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_CLOSE, merge_k)
+
+        px_count = int((final_mask > 0).sum())
+        print(f"  [mask {frame_idx:02d}] final cube mask: {px_count}px "
+              f"({100*px_count/final_mask.size:.1f}%)")
     else:
-        print(f"  [mask {frame_idx:02d}] no components — falling back to plate mask")
-        return plate_mask
+        print(f"  [mask {frame_idx:02d}] WARNING: no cube pixels found in plate ROI")
 
-    return cube_px
+    if frame_idx < 6 or frame_idx % 6 == 0:
+        os.makedirs("output/silhouettes", exist_ok=True)
+        cv2.imwrite(f"output/silhouettes/final_mask_{frame_idx:02d}.png", final_mask)
+        debug = img.copy()
+        debug[final_mask == 0] = (0, 0, 80)
+        cv2.imwrite(f"output/silhouettes/debug_{frame_idx:02d}.jpg", debug)
+
+    return final_mask
 
 
 def _detect_plate_mask(img: np.ndarray, gray: np.ndarray, frame_idx: int) -> np.ndarray:

@@ -13,7 +13,8 @@ CAMERA_HEIGHT     = 0.12    # H — vertical height of camera above ground (metr
 VOXEL_XY_EXTENT = 0.12      # ±metres in XY — set to slightly more than object radius
 VOXEL_Z_MIN     = -0.02     # metres below turntable surface
 VOXEL_Z_MAX     = 0.22      # metres above turntable surface
-
+# Debug
+DISK_SESSION_ANGLE_OFFSET = 0.40
 # ── Camera / MQTT ─────────────────────────────────────────────────────────────
 IMAGE_WIDTH  = 1600
 IMAGE_HEIGHT = 1200

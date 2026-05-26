@@ -127,6 +127,10 @@ def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[
               f"recovered C = {C_recover.round(4)}")
 
     print(f"\n[pose] All {len(projections)} projections computed.\n")
+    for i, P in enumerate(projections):
+        U, S, Vt = np.linalg.svd(P)
+        C = Vt[-1, :3] / Vt[-1, 3]
+        print(f"frame {i:02d} ({i*10}°): C = {C.round(3)}")
     return projections
 
 
@@ -263,16 +267,6 @@ DIST_COEFFS = np.zeros(5, dtype=np.float64)
 # --------------------------------------------------------------------------- #
 
 def _projection_for_pose_with_h(pose, K: np.ndarray, h: float) -> np.ndarray:
-    """
-    Build projection matrix for the given pose.
-    
-    Camera orbits the origin at azimuth = servo_angle_deg, at a slant
-    distance h from the origin. Its height is CAMERA_HEIGHT, so the
-    horizontal distance is horiz = sqrt(h² - H²).
-    
-    The camera is tilted DOWN toward the origin: pitch = arctan(H / horiz).
-    Azimuth is the servo angle (rotation about world Z).
-    """
     servo_rad = math.radians(pose.servo_angle_deg)
     H     = config.CAMERA_HEIGHT
     horiz = math.sqrt(max(h**2 - H**2, 0.0))
@@ -284,62 +278,35 @@ def _projection_for_pose_with_h(pose, K: np.ndarray, h: float) -> np.ndarray:
         H,
     ], dtype=np.float64)
 
-    # Tilt angle downward from horizontal toward the origin
-    pitch_down = math.atan2(H, horiz)   # positive = tilting down
-
-    # --- Build R as: first rotate around world-Z by servo_angle (azimuth),
-    #     then tilt down by pitch_down around the camera's local X axis.
-    #
-    # In the camera's "facing outward at 0°" frame:
-    #   camera X = world X  (points right along the orbit tangent)
-    #   camera Y = world Z  (points up — becomes "up" in image before tilt)
-    #   camera Z = world Y  (points away from origin — optical axis pre-tilt)
-    #
-    # After azimuth rotation by servo_rad:
-    #   right_world = [ cos(servo),  -sin(servo), 0 ]
-    #   (tangent to the orbit circle, pointing camera-right)
-    #
-    # After pitch (tilt down): optical axis tips toward the ground.
-
+    pitch_down = math.atan2(H, horiz)
     cos_s = math.cos(servo_rad)
     sin_s = math.sin(servo_rad)
     cos_p = math.cos(pitch_down)
     sin_p = math.sin(pitch_down)
 
-    # Camera right = tangent to orbit (perpendicular to radial direction, in XY plane)
-    right = np.array([ cos_s, -sin_s, 0.0], dtype=np.float64)
+    # X right: tangent to orbit, purely horizontal
+    right = np.array([cos_s, -sin_s, 0.0], dtype=np.float64)
 
-    # Camera forward AFTER pitch: starts pointing outward (+Y rotated by servo),
-    # then pitched down by pitch_down
-    #   pre-pitch forward (radial outward) = [-sin_s, -cos_s, 0]  (points TO origin, negated)
-    #   but we want the camera to look AT the origin, so forward = inward = [sin_s, cos_s, 0]
-    #   pitched down: forward.z -= sin_p, forward.xy *= cos_p
-    forward = np.array([
-         sin_s * cos_p,
-         cos_s * cos_p,
-        -sin_p,           # negative Z = downward in world (Z up convention)
-    ], dtype=np.float64)
+    # Z forward: from camera toward origin, pitched down
+    forward = np.array([-sin_s * cos_p, -cos_s * cos_p, sin_p], dtype=np.float64)
 
-    # Camera down = cross(right, forward)  [in a right-handed R,D,F camera frame]
-    down = np.cross(right, forward)
-    down /= np.linalg.norm(down)
+    # Y down: completes right-handed frame — cross(right, forward) NOT cross(forward, right)
+    down = np.cross(forward, right)
+    # No re-orthogonalisation needed — right and forward are already orthogonal by construction
 
-    # Re-orthogonalise forward against right (numerical safety)
-    forward = np.cross(down, right)   # RDF: F = D×R ... wait, RDF: R×D = -F, so F = -(R×D)
-    # Actually in a right-handed camera (X right, Y down, Z forward):
-    #   Z = X × Y  →  forward = cross(right, down)
-    forward = np.cross(right, down)
-    forward /= np.linalg.norm(forward)
+    R_world_to_cam = np.stack([right, down, forward], axis=0)
 
-    # Rows of R_world_to_cam: [right; down; forward]
-    R_world_to_cam = np.stack([right, down, forward], axis=0)  # (3,3)
+    # Verify determinant = +1 (proper rotation, not reflection)
+    det = np.linalg.det(R_world_to_cam)
+    depth_to_origin = float(np.dot(forward, -C))
+    print(f"    [proj] servo={pose.servo_angle_deg:.0f}°  "
+          f"pitch={math.degrees(pitch_down):.1f}°  "
+          f"det(R)={det:.4f}  depth_to_origin={depth_to_origin:.4f}m")
+    if abs(det - 1.0) > 0.01:
+        print(f"    [WARN] R is not a proper rotation! det={det:.4f}")
+    if depth_to_origin < 0:
+        print(f"    [WARN] camera pointing away from origin!")
 
     t = -R_world_to_cam @ C
-
-    print(f"    [proj] servo={pose.servo_angle_deg:.0f}°  "
-          f"pitch_down={math.degrees(pitch_down):.1f}°  "
-          f"h={h:.4f}m  horiz={horiz:.4f}m  "
-          f"C={C.round(3)}  t={t.round(3)}")
-
     return K @ np.hstack([R_world_to_cam, t.reshape(3, 1)])
 

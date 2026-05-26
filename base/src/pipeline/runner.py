@@ -35,7 +35,13 @@ def run(session: ScanSession, on_progress=None) -> str:
         C = Vt[-1, :3] / Vt[-1, 3]
         print(f"frame {i:02d}: camera centre = {C.round(3)}")
     _progress("[2/5] Projections computed")
-
+    for i, P in enumerate(projections):
+    # Condition number — should be O(1000) not O(1e9)
+        print(f"frame {i:02d}: cond(P) = {np.linalg.cond(P):.2e}")
+        # Check camera centre via null space
+        _, _, Vt = np.linalg.svd(P)
+        C = Vt[-1, :3] / Vt[-1, 3]
+        print(f"frame {i:02d}: C = {C.round(4)}, |C| = {np.linalg.norm(C):.4f}")
     # Step 3: Visual hull
     from pipeline.visual_hull import compute_visual_hull
     points_3d = compute_visual_hull(images, projections, grid_resolution=80)
