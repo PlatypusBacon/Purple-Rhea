@@ -164,22 +164,25 @@ def _build_mask(img: np.ndarray, frame_idx: int = 0) -> np.ndarray:
     # The plate surface is dark (low value). The cube is bright/coloured. #
     # Simply threshold: dark = plate surface = background                 #
     # ------------------------------------------------------------------ #
-    
-    # Convert to LAB for better brightness separation
+
+    # Erode the plate mask to strip the bright metallic rim and push the
+    # boundary away from the white wall visible behind the plate edge.
+    erode_k = np.ones((45, 45), np.uint8)
+    plate_interior = cv2.erode(plate_mask, erode_k, iterations=1)
+
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    L   = lab[:, :, 0]   # L channel: 0=black, 255=white
-    
-    # Plate surface is dark — threshold to find bright (cube) pixels
-    # Tune the threshold (currently 80) if cube bottom gets clipped
-    _, cube_bright = cv2.threshold(L, 80, 255, cv2.THRESH_BINARY)
-    
-    # Also catch all saturated colours (cube faces)
+    L   = lab[:, :, 0]
+
+    # Bright but not TOO bright: wall behind plate is L > 190
+    cube_bright = cv2.inRange(L, 55, 190)
+
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     coloured = cv2.inRange(hsv, (0, 60, 40), (180, 255, 255))
-    
-    # Union: anything bright OR coloured inside the plate
+    # Exclude near-white saturated pixels (wall can have slight color cast)
+    coloured = cv2.bitwise_and(coloured, cv2.bitwise_not(cv2.inRange(L, 190, 255)))
+
     cube_px = cv2.bitwise_or(cube_bright, coloured)
-    cube_px = cv2.bitwise_and(cube_px, plate_mask)
+    cube_px = cv2.bitwise_and(cube_px, plate_interior)
     
     roi_px = int(cube_px.sum() // 255)
     print(f"  [mask {frame_idx:02d}] cube pixels inside plate: {roi_px}")
