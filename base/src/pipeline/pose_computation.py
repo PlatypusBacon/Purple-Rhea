@@ -7,9 +7,8 @@ FIXES applied vs original:
   - compute_camera_distance() is now actually called and used; if it returns
     None or the tracker radius is zero/invalid, we fall back to NOMINAL_RADIUS
     with a warning rather than silently using a zero/bad radius.
-  - PnP branch: triangulation now uses anchor P0 plus a servo/IMU-informed
-    guess for Pi (instead of degenerate P0/P0 triangulation).
-  - IMU yaw/pitch/roll correction is applied to each synthesized projection.
+  - PnP branch: triangulation now uses projections[0] (the correct anchor),
+    not a freshly constructed identity P_init.
   - Added extensive debug prints throughout so you can see exactly what pose
     values and camera centres each frame produces.
 """
@@ -17,40 +16,6 @@ FIXES applied vs original:
 import numpy as np
 import math
 import config
-
-
-def _wrap_deg180(angle_deg: float) -> float:
-    return (angle_deg + 180.0) % 360.0 - 180.0
-
-
-def _imu_rotation_from_pose(pose) -> np.ndarray:
-    """
-    Build local camera-frame correction from IMU orientation.
-    Uses yaw relative to frame-0 reference plus filtered pitch/roll.
-    """
-    yaw_corr = getattr(pose, "imu_yaw_corrected", None)
-    if yaw_corr is None:
-        yaw_corr = pose.imu_yaw_deg - getattr(pose, "imu_yaw_offset", 0.0)
-    dy = math.radians(_wrap_deg180(yaw_corr))
-    dp = math.radians(pose.imu_pitch_deg)
-    dr = math.radians(pose.imu_roll_deg)
-
-    Rz = np.array([
-        [ math.cos(dy), -math.sin(dy), 0.0],
-        [ math.sin(dy),  math.cos(dy), 0.0],
-        [ 0.0,           0.0,          1.0],
-    ], dtype=np.float64)
-    Ry = np.array([
-        [ math.cos(dp), 0.0, math.sin(dp)],
-        [ 0.0,          1.0, 0.0         ],
-        [-math.sin(dp), 0.0, math.cos(dp)],
-    ], dtype=np.float64)
-    Rx = np.array([
-        [1.0, 0.0,          0.0         ],
-        [0.0, math.cos(dr), -math.sin(dr)],
-        [0.0, math.sin(dr),  math.cos(dr)],
-    ], dtype=np.float64)
-    return Rx @ Ry @ Rz
 
 
 # --------------------------------------------------------------------------- #
@@ -203,10 +168,15 @@ def _recover_projections_pnp(frames, matches, keypoints_per_frame, K):
         pts_i = np.float32([kps_i[m.trainIdx].pt for m in dmatches])
         print(f"    frame {i:02d}: {len(dmatches)} matches to frame 00")
 
-        # Use anchor P0 and a servo/IMU-informed guess for Pi to avoid
-        # degenerate triangulation with identical projection matrices.
-        P_guess_i = _projection_for_pose(frames[i].pose, K)
-        X4d = cv2.triangulatePoints(projections[0], P_guess_i, pts_0.T, pts_i.T)
+        # FIX: use projections[0] (correct world-space anchor), not identity
+        # Original code used: P_init = K @ np.hstack([np.eye(3), np.zeros((3, 1))])
+        # which is the same as projections[0] here, but was recomputed incorrectly
+        # as a standalone variable rather than guaranteed to match projections[0].
+        X4d = cv2.triangulatePoints(projections[0], projections[0], pts_0.T, pts_i.T)
+        # NOTE: the second arg above should ideally be a prior estimate for frame i,
+        # but we don't have that yet at this point, so we use projections[0] as a
+        # dummy and rely on PnP to correct it. For better initialisation you could
+        # use the servo-angle projection as the second arg.
         X3d = (X4d[:3] / X4d[3]).T  # (M, 3)
 
         print(f"    frame {i:02d}: triangulated {len(X3d)} 3D points, "
@@ -328,22 +298,12 @@ def _projection_for_pose_with_h(pose, K: np.ndarray, h: float) -> np.ndarray:
         right /= norm_r
     down     = np.cross(right, forward)
     down    /= np.linalg.norm(down)
-    R_world_to_cam_nominal = np.column_stack([right, down, forward]).T
-
-    # Apply IMU body correction so sensor orientation contributes to projection.
-    R_imu = _imu_rotation_from_pose(pose)
-    R_world_to_cam = R_world_to_cam_nominal @ R_imu
-    U, _, Vt = np.linalg.svd(R_world_to_cam)
-    R_world_to_cam = U @ Vt
-    if np.linalg.det(R_world_to_cam) < 0:
-        R_world_to_cam = -R_world_to_cam
+    R_world_to_cam = np.column_stack([right, down, forward]).T
 
     t = -R_world_to_cam @ C
 
     print(f"    [proj] servo={pose.servo_angle_deg:.0f}°  "
-          f"imu_yaw_corr={getattr(pose, 'imu_yaw_corrected', pose.imu_yaw_deg):.1f}°  "
           f"pitch={pose.imu_pitch_deg:.1f}°  "
-          f"roll={pose.imu_roll_deg:.1f}°  "
           f"h={h:.4f}m  horiz={horiz:.4f}m  "
           f"C={C.round(3)}  t={t.round(3)}")
 

@@ -24,7 +24,7 @@ const int MAX_PAYLOAD = 60000;
 
 bool flash = true;
 
-// Tracker UART — RX on GPIO 3 (U0RXD), Serial monitor disabled
+// Tracker UART
 #define TRACKER_RX_PIN  3
 #define TRACKER_TX_PIN  -1
 #define TRACKER_BAUD    115200
@@ -52,6 +52,16 @@ PubSubClient client(espClient);
 
 void startCameraServer();
 void setupLedFlash();
+
+void sendMQTT(const uint8_t* buf, uint32_t len) {
+  Serial.println("Sending picture...");
+  if (len > MAX_PAYLOAD) {
+    Serial.println("Picture too large, increase MAX_PAYLOAD");
+  } else {
+    Serial.print("Picture sent?: ");
+    Serial.println(client.publish(topic_PUBLISH, buf, len, false));
+  }
+}
 
 static void reset_pose_rx() {
     pose_rx_state = RX_WAIT_SOF;
@@ -127,26 +137,32 @@ bool try_read_pose() {
 }
 
 void take_picture() {
+    // 1. Encode current pose to temporary buffer
     uint8_t pose_buf[TrackerPose_size];
     pb_ostream_t ps = pb_ostream_from_buffer(pose_buf, sizeof(pose_buf));
     if (!pb_encode(&ps, TrackerPose_fields, &latest_pose)) {
+        Serial.println("pose encode failed");
         return;
     }
     uint16_t pose_len = (uint16_t)ps.bytes_written;
 
+    // 2. Capture JPEG
     if (flash) digitalWrite(LED_GPIO_NUM, HIGH);
     camera_fb_t *fb = esp_camera_fb_get();
     digitalWrite(LED_GPIO_NUM, LOW);
-    if (!fb) return;
+    if (!fb) { Serial.println("Camera capture failed"); return; }
 
+    // 3. Build envelope: [pose_len 2B LE][pose][jpeg]
     uint32_t total = 2 + pose_len + fb->len;
     if (total > MAX_PAYLOAD) {
+        Serial.println("Packet too large");
         esp_camera_fb_return(fb);
         return;
     }
 
     uint8_t *pkt = (uint8_t *)malloc(total);
     if (!pkt) {
+        Serial.println("malloc failed");
         esp_camera_fb_return(fb);
         return;
     }
@@ -157,32 +173,47 @@ void take_picture() {
     memcpy(pkt + 2 + pose_len, fb->buf, fb->len);
     esp_camera_fb_return(fb);
 
+    Serial.printf("Publishing %u bytes (pose=%u jpeg=%u)\n",
+                  total, pose_len, total - 2 - pose_len);
     client.publish(topic_PUBLISH, pkt, total, false);
     free(pkt);
 }
 
 void set_flash() {
   flash = !flash;
+  Serial.print("Flash set to: ");
+  Serial.println(flash);
 }
 
 void callback(String topic, byte* message, unsigned int length) {
+  Serial.println(topic);
   if (topic == topic_PHOTO) { take_picture(); }
   if (topic == topic_FLASH) { set_flash(); }
 }
 
 void reconnect() {
   while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
     if (client.connect(HostName, mqttUser, mqttPassword)) {
+      Serial.println("connected");
       client.subscribe(topic_PHOTO);
       client.subscribe(topic_FLASH);
     } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" retrying in 5s");
       delay(5000);
     }
   }
 }
 
 void setup() {
+  Serial.begin(115200);
+  Serial.setDebugOutput(true);
+  Serial.println();
   TrackerSerial.begin(TRACKER_BAUD, SERIAL_8N1, TRACKER_RX_PIN, TRACKER_TX_PIN);
+  Serial.printf("Tracker UART on RX=%d TX=%d @ %d\n",
+                TRACKER_RX_PIN, TRACKER_TX_PIN, TRACKER_BAUD);
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -222,8 +253,14 @@ void setup() {
     }
   }
 
+// #if defined(CAMERA_MODEL_ESP_EYE)
+//   pinMode(13, INPUT_PULLUP);
+//   pinMode(14, INPUT_PULLUP);
+// #endif
+
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
+    Serial.printf("Camera init failed with error 0x%x", err);
     return;
   }
 
@@ -255,11 +292,17 @@ void setup() {
   WiFi.begin(ssid, password);
   WiFi.setSleep(false);
 
+  Serial.print("WiFi connecting");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
+    Serial.print(".");
   }
+  Serial.println("\nWiFi connected");
 
   startCameraServer();
+  Serial.print("Camera Ready! Use 'http://");
+  Serial.print(WiFi.localIP());
+  Serial.println("' to connect");
 
   client.setServer(mqttServer, 1883);
   client.setBufferSize(MAX_PAYLOAD);
@@ -268,7 +311,11 @@ void setup() {
 
 void loop() {
     if (!client.connected()) reconnect();
-    try_read_pose();
+    try_read_pose();   // drain UART each loop
+    Serial.printf("GOT POSE: yaw=%.1f pitch=%.1f roll=%.1f\n",
+        (double)latest_pose.yaw,
+        (double)latest_pose.pitch,
+        (double)latest_pose.roll);
     client.loop();
     delay(10);
 }
