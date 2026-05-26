@@ -7,7 +7,7 @@ RIG_BASE_LENGTH   = 0.13    # r — horizontal base length (metres)
 RIG_MIDDLE_LENGTH = 0.25    # x — middle segment length (metres)
 RIG_FINAL_LENGTH  = 0.09    # y — final segment length (metres)
 NOMINAL_RADIUS = 0.50    # measure this directly — tape from camera lens to turntable centre
-CAMERA_HEIGHT  = 0.28    # measure from camera lens down to turntable surface
+CAMERA_HEIGHT  = 0.25    # measure from camera lens down to turntable surface
 
 # ── Voxel grid bounds (used in visual_hull.py AND surface.py) ─────────────────
 VOXEL_XY_EXTENT = 0.12      # ±metres in XY — set to slightly more than object radius
