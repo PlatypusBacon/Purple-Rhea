@@ -173,52 +173,56 @@ def _save_flow_debug(flow, mask, img, idx1, idx2):
 
 def _project_disk_mask(img, P, frame_idx):
     """
-    Project the physical turntable disk (circle at z=0, radius=RIG_BASE_LENGTH)
-    into the image using projection matrix P, and fill the resulting ellipse
-    as the mask.
+    Project the bounding cylinder of the object volume into the image:
+      - bottom ring: z = VOXEL_Z_MIN, radius = RIG_BASE_LENGTH
+      - top ring:    z = VOXEL_Z_MAX, radius = RIG_BASE_LENGTH
+    Fill the convex hull of all projected points as the mask.
+    This captures everything that could sit on the turntable.
     """
     h_img, w_img = img.shape[:2]
     R = config.RIG_BASE_LENGTH
+    z_lo = config.VOXEL_Z_MIN
+    z_hi = config.VOXEL_Z_MAX
     N_SAMPLES = 360
 
     angles = np.linspace(0, 2 * np.pi, N_SAMPLES, endpoint=False)
-    world_pts = np.zeros((N_SAMPLES, 4))
-    world_pts[:, 0] = R * np.cos(angles)
-    world_pts[:, 1] = R * np.sin(angles)
-    world_pts[:, 3] = 1.0
+    cx_ring = R * np.cos(angles)
+    cy_ring = R * np.sin(angles)
+
+    bottom = np.column_stack([cx_ring, cy_ring,
+                              np.full(N_SAMPLES, z_lo),
+                              np.ones(N_SAMPLES)])
+    top = np.column_stack([cx_ring, cy_ring,
+                           np.full(N_SAMPLES, z_hi),
+                           np.ones(N_SAMPLES)])
+    world_pts = np.vstack([bottom, top])
 
     proj = (P @ world_pts.T).T
     d = proj[:, 2]
     valid = d > 1e-6
     if valid.sum() < 5:
-        print(f"  [mask {frame_idx:02d}] disk projection failed — too few valid points")
+        print(f"  [mask {frame_idx:02d}] cylinder projection failed")
         return np.zeros((h_img, w_img), dtype=np.uint8)
 
-    px = (proj[valid, 0] / d[valid]).astype(np.float32)
-    py = (proj[valid, 1] / d[valid]).astype(np.float32)
+    px = proj[valid, 0] / d[valid]
+    py = proj[valid, 1] / d[valid]
 
-    contour = np.stack([px, py], axis=1).reshape(-1, 1, 2)
-
-    if len(contour) < 5:
-        print(f"  [mask {frame_idx:02d}] not enough projected points for ellipse fit")
-        return np.zeros((h_img, w_img), dtype=np.uint8)
-
-    ellipse = cv2.fitEllipse(contour)
+    pts_2d = np.stack([px, py], axis=1).astype(np.float32)
+    hull = cv2.convexHull(pts_2d.reshape(-1, 1, 2))
 
     mask = np.zeros((h_img, w_img), dtype=np.uint8)
-    cv2.ellipse(mask, ellipse, 255, -1)
+    cv2.fillConvexPoly(mask, hull.astype(np.int32), 255)
 
     mask_px = int(mask.sum() // 255)
-    (cx, cy), (ax_w, ax_h), angle = ellipse
-    print(f"  [mask {frame_idx:02d}] projected disk: centre=({cx:.0f},{cy:.0f}) "
-          f"axes=({ax_w:.0f},{ax_h:.0f}) angle={angle:.0f}° "
+    print(f"  [mask {frame_idx:02d}] projected cylinder: "
+          f"hull {len(hull)} verts, "
           f"covers {mask_px} px ({100*mask_px/(h_img*w_img):.1f}%)")
 
     os.makedirs("output/silhouettes", exist_ok=True)
     cv2.imwrite(f"output/silhouettes/mask_{frame_idx:02d}.png", mask)
     debug = img.copy()
     debug[mask == 0] = (debug[mask == 0] * 0.3).astype(np.uint8)
-    cv2.ellipse(debug, ellipse, (0, 255, 0), 2)
+    cv2.drawContours(debug, [hull.astype(np.int32)], 0, (0, 255, 0), 2)
     cv2.imwrite(f"output/silhouettes/debug_{frame_idx:02d}.jpg", debug)
 
     return mask
