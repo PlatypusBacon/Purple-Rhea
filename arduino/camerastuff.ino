@@ -13,14 +13,14 @@ const char *ssid = "Jgggggg";
 const char *password = "Jg200311";
 
 // MQTT config
-const char* mqttServer = "10.134.99.217";
+const char* mqttServer = "10.133.32.146";
 const char* HostName = "ESP32-CAM";
 const char* mqttUser = "47484333";
 const char* mqttPassword = "47484333";
 const char* topic_PHOTO = "SMILE";
 const char* topic_PUBLISH = "PICTURE";
 const char* topic_FLASH = "FLASH";
-const int MAX_PAYLOAD = 60000;
+const int MAX_PAYLOAD = 250000;
 
 bool flash = true;
 
@@ -176,12 +176,12 @@ void setup() {
     config.pixel_format = PIXFORMAT_JPEG;
     config.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
     config.fb_location  = CAMERA_FB_IN_PSRAM;
-    config.jpeg_quality = 12;
+    config.jpeg_quality = 4;
     config.fb_count     = 1;
 
     if (config.pixel_format == PIXFORMAT_JPEG) {
         if (psramFound()) {
-            config.jpeg_quality = 10;
+            config.jpeg_quality = 4;
             config.fb_count     = 2;
             config.grab_mode    = CAMERA_GRAB_LATEST;
         } else {
@@ -190,10 +190,10 @@ void setup() {
         }
     }
 
-#if defined(CAMERA_MODEL_ESP_EYE)
-    pinMode(13, INPUT_PULLUP);
-    pinMode(14, INPUT_PULLUP);
-#endif
+// #if defined(CAMERA_MODEL_ESP_EYE)
+//     pinMode(13, INPUT_PULLUP);
+//     pinMode(14, INPUT_PULLUP);
+// #endif
 
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
@@ -207,9 +207,9 @@ void setup() {
         s->set_brightness(s, 1);
         s->set_saturation(s, -2);
     }
-    if (config.pixel_format == PIXFORMAT_JPEG) {
-        s->set_framesize(s, FRAMESIZE_QVGA);
-    }
+    // if (config.pixel_format == PIXFORMAT_JPEG) {
+    //     s->set_framesize(s, FRAMESIZE_QVGA);
+    // }
 
 #if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)
     s->set_vflip(s, 1);
