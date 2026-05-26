@@ -172,17 +172,24 @@ void callback(String topic, byte* message, unsigned int length) {
 
 void reconnect() {
   while (!client.connected()) {
+    Serial.print("MQTT connecting...");
     if (client.connect(HostName, mqttUser, mqttPassword)) {
+      Serial.println("connected");
       client.subscribe(topic_PHOTO);
       client.subscribe(topic_FLASH);
     } else {
+      Serial.printf("failed rc=%d\n", client.state());
       delay(5000);
     }
   }
 }
 
 void setup() {
+  // TX-only Serial on GPIO 1 for debug — RX pin disabled (-1) so GPIO 3 stays free
+  Serial.begin(115200, SERIAL_8N1, -1, 1);
+  Serial.println();
   TrackerSerial.begin(TRACKER_BAUD, SERIAL_8N1, TRACKER_RX_PIN, TRACKER_TX_PIN);
+  Serial.printf("Tracker UART on RX=%d @ %d\n", TRACKER_RX_PIN, TRACKER_BAUD);
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -224,8 +231,10 @@ void setup() {
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
+    Serial.printf("Camera init failed 0x%x\n", err);
     return;
   }
+  Serial.println("Camera init OK");
 
   sensor_t* s = esp_camera_sensor_get();
   if (s->id.PID == OV3660_PID) {
@@ -255,20 +264,42 @@ void setup() {
   WiFi.begin(ssid, password);
   WiFi.setSleep(false);
 
+  Serial.print("WiFi connecting");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
+    Serial.print(".");
   }
+  Serial.println(" connected");
 
   startCameraServer();
+  Serial.printf("Camera Ready! http://%s\n", WiFi.localIP().toString().c_str());
 
   client.setServer(mqttServer, 1883);
   client.setBufferSize(MAX_PAYLOAD);
   client.setCallback(callback);
 }
 
+static uint32_t loop_debug_ms = 0;
+static uint32_t pose_ok_count = 0;
+
 void loop() {
     if (!client.connected()) reconnect();
-    try_read_pose();
+    if (try_read_pose()) {
+        pose_ok_count++;
+        Serial.printf("[POSE] #%lu yaw=%.1f pitch=%.1f roll=%.1f\n",
+            (unsigned long)pose_ok_count,
+            (double)latest_pose.yaw,
+            (double)latest_pose.pitch,
+            (double)latest_pose.roll);
+    }
+
+    if (millis() - loop_debug_ms > 5000) {
+        Serial.printf("[DBG] uptime=%lus poses=%lu tracker_avail=%d\n",
+            millis() / 1000, (unsigned long)pose_ok_count,
+            TrackerSerial.available());
+        loop_debug_ms = millis();
+    }
+
     client.loop();
     delay(10);
 }
