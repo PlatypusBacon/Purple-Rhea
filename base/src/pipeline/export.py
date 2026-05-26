@@ -43,6 +43,32 @@ def write_obj(points_3d: np.ndarray, path: str) -> None:
     print(f"    wrote {len(pts)} vertices to {path}")
 
 
+def write_ply(points_3d: np.ndarray, path: str,
+              colors: np.ndarray | None = None) -> None:
+    """Write a PLY point cloud, optionally with per-vertex BGR colors."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    n = len(points_3d)
+    has_color = colors is not None and len(colors) == n
+
+    with open(path, "w") as f:
+        f.write("ply\nformat ascii 1.0\n")
+        f.write(f"element vertex {n}\n")
+        f.write("property float x\nproperty float y\nproperty float z\n")
+        if has_color:
+            f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
+        f.write("end_header\n")
+
+        for i in range(n):
+            x, y, z = points_3d[i]
+            if has_color:
+                b, g, r = int(colors[i, 0]), int(colors[i, 1]), int(colors[i, 2])
+                f.write(f"{x:.6f} {y:.6f} {z:.6f} {r} {g} {b}\n")
+            else:
+                f.write(f"{x:.6f} {y:.6f} {z:.6f}\n")
+
+    print(f"    wrote {n} vertices to {path}")
+
+
 # --------------------------------------------------------------------------- #
 #  Normal estimation stub                                                      #
 # --------------------------------------------------------------------------- #
