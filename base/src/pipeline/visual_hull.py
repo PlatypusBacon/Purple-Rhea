@@ -134,6 +134,52 @@ def compute_visual_hull(images, projections, grid_resolution=80):
 #  Mask generation                                                             #
 # --------------------------------------------------------------------------- #
 
+def _project_plate_mask(img: np.ndarray, P: np.ndarray, frame_idx: int) -> np.ndarray:
+    """
+    Project the known physical plate circle into the image using P,
+    and fill it to create the plate ROI mask.
+    
+    Much more reliable than Canny-based detection since it uses known geometry.
+    """
+    h, w = img.shape[:2]
+    
+    plate_radius = config.PLATE_RADIUS  # physical radius in metres, e.g. 0.15
+    n_points = 360
+    
+    # Sample points around the plate circle at Z=0 (plate sits on turntable surface)
+    angles = np.linspace(0, 2 * np.pi, n_points)
+    circle_3d = np.array([
+        [plate_radius * np.cos(a), plate_radius * np.sin(a), 0.0, 1.0]
+        for a in angles
+    ])  # (360, 4)
+    
+    # Project into image
+    proj = (P @ circle_3d.T).T  # (360, 3)
+    depth = proj[:, 2]
+    
+    valid = depth > 0
+    if valid.sum() < 10:
+        print(f"  [plate {frame_idx:02d}] projected plate mostly behind camera — fallback")
+        return _fallback_ellipse(img)
+    
+    px = (proj[:, 0] / np.where(valid, depth, 1)).astype(int)
+    py = (proj[:, 1] / np.where(valid, depth, 1)).astype(int)
+    
+    points = np.stack([px[valid], py[valid]], axis=1)
+    
+    # Clamp to image bounds for drawing
+    points[:, 0] = np.clip(points[:, 0], 0, w - 1)
+    points[:, 1] = np.clip(points[:, 1], 0, h - 1)
+    
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(mask, [points.reshape(-1, 1, 2)], 255)
+    
+    px_count = int(mask.sum() // 255)
+    print(f"  [plate {frame_idx:02d}] projected plate mask: {px_count} px "
+          f"({100*px_count/mask.size:.1f}%)")
+    
+    return mask
+
 def _build_mask(img: np.ndarray, frame_idx: int = 0) -> np.ndarray:
     """
     Build silhouette mask by:
@@ -149,7 +195,7 @@ def _build_mask(img: np.ndarray, frame_idx: int = 0) -> np.ndarray:
     # Stage 1: Find the turntable plate using Canny + contours            #
     # The plate rim appears as a bright elliptical ring on the dark mat.  #
     # ------------------------------------------------------------------ #
-    plate_mask = _detect_plate_mask(img, gray, frame_idx)
+    plate_mask = _project_plate_mask(img, P, frame_idx)
     plate_px = int(plate_mask.sum() // 255)
     print(f"  [mask {frame_idx:02d}] plate mask covers {plate_px} px "
           f"({100*plate_px/plate_mask.size:.1f}% of image)")
