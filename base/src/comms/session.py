@@ -5,7 +5,6 @@ import threading
 import time
 import cv2
 import numpy as np
-import lgpio
 import paho.mqtt.client as mqtt
 import os
 
@@ -101,8 +100,7 @@ def _step_motor(chip: int, n_steps: int, phase: int = 0) -> int:
     next_t = time.perf_counter()
     for _ in range(n_steps):
         pattern = _STEP_SEQ[phase]
-        for pin, value in zip(_PINS, pattern):
-            lgpio.gpio_write(chip, pin, value)
+
         next_t += _STEP_DELAY_S
         sleep = next_t - time.perf_counter()
         if sleep > 0:
@@ -158,12 +156,10 @@ class BLEPoseClient:
             try:
                 async with BleakClient(device) as client:
                     self._client = client
-                    await client.start_notify(
-                        _BLE_POSE_CHR_UUID, self._on_notify
-                    )
+                    await client.start_notify(_BLE_POSE_CHR_UUID, self._on_notify)
                     print("[BLE] connected and subscribed")
+                    await asyncio.sleep(1.0)   # let CCC registration reach the peripheral
                     self._ready.set()
-                    # Just keep alive — requests come in via request_pose()
                     while client.is_connected:
                         await asyncio.sleep(0.5)
             except Exception as e:
@@ -196,21 +192,26 @@ class BLEPoseClient:
         if self._client is None or not self._client.is_connected:
             raise RuntimeError("BLE not connected")
 
-        # Clear any previous event before requesting
-        self._pose_event.clear()
-        self._latest_proto = None
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            self._pose_event.clear()
+            self._latest_proto = None
 
-        await self._client.write_gatt_char(
-            _BLE_REQ_CHR_UUID, b"\x01", response=False
-        )
+            print(f"  [BLE] write attempt {attempt}/{max_attempts}")
+            await self._client.write_gatt_char(
+                _BLE_REQ_CHR_UUID, b"\x01", response=False  # must match WRITE_WITHOUT_RESP
+            )
 
-        try:
-            await asyncio.wait_for(self._pose_event.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            raise TimeoutError("BLE pose notify timed out")
+            try:
+                await asyncio.wait_for(self._pose_event.wait(), timeout=timeout)
+                self._pose_event.clear()
+                return self._latest_proto
+            except asyncio.TimeoutError:
+                print(f"  [BLE] attempt {attempt} timed out — "
+                    f"{'retrying' if attempt < max_attempts else 'giving up'}")
+                await asyncio.sleep(0.5)
 
-        self._pose_event.clear()
-        return self._latest_proto
+        raise TimeoutError(f"BLE pose notify timed out after {max_attempts} attempts")
 
 
 # ── MQTT image waiter ─────────────────────────────────────────────────────────
