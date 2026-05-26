@@ -350,43 +350,76 @@ def _build_mask(img: np.ndarray, P: np.ndarray, frame_idx: int = 0) -> np.ndarra
 
     # Get plate ROI using fused projection + rim detection
     plate_mask = _build_plate_mask(img, P, frame_idx)
+    plate_pixels = np.where(plate_mask > 0)
+    if len(plate_pixels[0]) == 0:
+        print(f"  [mask {frame_idx:02d}] WARNING: plate mask is empty")
+        return np.zeros((h_img, w_img), dtype=np.uint8)
 
-    # ------------------------------------------------------------------ #
-    # Detect cube pixels within plate ROI                                 #
-    # Cube: saturated stickers OR bright white stickers                   #
-    # ------------------------------------------------------------------ #
-    high_sat   = (sat_ch > 70).astype(np.uint8) * 255
-    bright_white = ((val_ch > 160) & (sat_ch < 60)).astype(np.uint8) * 255
-    cube_raw   = cv2.bitwise_or(high_sat, bright_white)
-    cube_in_roi = cv2.bitwise_and(cube_raw, plate_mask)
+    # Estimate plate centre/radius from mask area.
+    plate_area = float((plate_mask > 0).sum())
+    plate_cx = float(np.mean(plate_pixels[1]))
+    plate_cy = float(np.mean(plate_pixels[0]))
+    plate_r = float(np.sqrt(max(plate_area, 1.0) / math.pi))
 
-    # Close to bridge black grid lines between stickers
-    close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
-    cube_closed = cv2.morphologyEx(cube_in_roi, cv2.MORPH_CLOSE, close_k)
+    # Erode plate ROI so the bright rim cannot leak into the object mask.
+    rim_margin = max(7, int(plate_r * 0.10))
+    rim_k = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * rim_margin + 1, 2 * rim_margin + 1)
+    )
+    inner_plate = cv2.erode(plate_mask, rim_k)
+    if not np.any(inner_plate):
+        inner_plate = plate_mask.copy()
 
-    # Open to remove isolated speckle
-    open_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    cube_clean = cv2.morphologyEx(cube_closed, cv2.MORPH_OPEN, open_k)
+    inner_idx = inner_plate > 0
+    sat_vals = sat_ch[inner_idx]
+    val_vals = val_ch[inner_idx]
 
-    # Keep largest connected component(s) only
-    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(cube_clean, connectivity=8)
-    final_mask = np.zeros((h_img, w_img), dtype=np.uint8)
+    sat_thr = max(45, int(np.percentile(sat_vals, 65)))
+    val_hi = max(135, int(np.percentile(val_vals, 82)))
 
-    if n_labels > 1:
-        areas = stats[1:, cv2.CC_STAT_AREA]
-        largest_area = float(np.max(areas))
-        for lbl in range(1, n_labels):
-            if stats[lbl, cv2.CC_STAT_AREA] >= largest_area * 0.15:
-                final_mask[labels == lbl] = 255
+    # Initial seeds: colorful stickers + bright low-saturation whites.
+    color_seed = sat_ch >= sat_thr
+    white_seed = (val_ch >= val_hi) & (sat_ch <= max(70, sat_thr))
+    seed = (color_seed | white_seed) & inner_idx
 
-        merge_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
-        final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_CLOSE, merge_k)
+    # Add strong local texture only near seeded regions (captures black cube edges).
+    gray = _to_gray(img)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    grad = cv2.magnitude(gx, gy)
+    grad_thr = max(20.0, float(np.percentile(grad[inner_idx], 85)))
+    edge = grad >= grad_thr
+    grow_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    seed_dil = cv2.dilate((seed.astype(np.uint8) * 255), grow_k) > 0
 
+    cube_raw = (seed | (edge & seed_dil)) & inner_idx
+    cube_raw_u8 = (cube_raw.astype(np.uint8) * 255)
+
+    open_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
+    cube_clean = cv2.morphologyEx(cube_raw_u8, cv2.MORPH_OPEN, open_k)
+    cube_clean = cv2.morphologyEx(cube_clean, cv2.MORPH_CLOSE, close_k)
+
+    final_mask = _select_object_components(
+        cube_clean,
+        plate_cx=plate_cx,
+        plate_cy=plate_cy,
+        plate_r=plate_r,
+        plate_area=plate_area,
+    )
+
+    if np.any(final_mask):
+        smooth_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_CLOSE, smooth_k)
         px_count = int((final_mask > 0).sum())
-        print(f"  [mask {frame_idx:02d}] final cube mask: {px_count}px "
-              f"({100*px_count/final_mask.size:.1f}%)")
+        print(
+            f"  [mask {frame_idx:02d}] cube mask: {px_count}px "
+            f"({100*px_count/final_mask.size:.1f}%) "
+            f"sat_thr={sat_thr} val_hi={val_hi} grad_thr={grad_thr:.1f}"
+        )
     else:
-        print(f"  [mask {frame_idx:02d}] WARNING: no cube pixels found in plate ROI")
+        print(f"  [mask {frame_idx:02d}] WARNING: no object component survived filtering")
+        final_mask = np.zeros((h_img, w_img), dtype=np.uint8)
 
     if frame_idx < 6 or frame_idx % 6 == 0:
         os.makedirs("output/silhouettes", exist_ok=True)
@@ -396,6 +429,64 @@ def _build_mask(img: np.ndarray, P: np.ndarray, frame_idx: int = 0) -> np.ndarra
         cv2.imwrite(f"output/silhouettes/debug_{frame_idx:02d}.jpg", debug)
 
     return final_mask
+
+
+def _select_object_components(
+    cube_clean: np.ndarray,
+    plate_cx: float,
+    plate_cy: float,
+    plate_r: float,
+    plate_area: float,
+) -> np.ndarray:
+    """
+    Keep connected components that look like the object:
+    - not tiny/noisy
+    - not huge like the full plate
+    - close to plate centre
+    """
+    h, w = cube_clean.shape
+    out = np.zeros((h, w), dtype=np.uint8)
+
+    n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        cube_clean, connectivity=8
+    )
+    if n_labels <= 1:
+        return out
+
+    min_area = max(250, int(plate_area * 0.002))
+    max_area = int(plate_area * 0.45)
+
+    candidates = []
+    for lbl in range(1, n_labels):
+        area = int(stats[lbl, cv2.CC_STAT_AREA])
+        if area < min_area or area > max_area:
+            continue
+
+        cx, cy = centroids[lbl]
+        dist = float(np.hypot(cx - plate_cx, cy - plate_cy))
+        if dist > plate_r * 0.80:
+            continue
+
+        bw = float(stats[lbl, cv2.CC_STAT_WIDTH])
+        bh = float(stats[lbl, cv2.CC_STAT_HEIGHT])
+        compact = area / max(bw * bh, 1.0)
+        score = area * (1.0 + compact) / (1.0 + dist / max(plate_r, 1.0))
+        candidates.append((lbl, area, dist, score))
+
+    if not candidates:
+        return out
+
+    candidates.sort(key=lambda t: t[3], reverse=True)
+    best_area = float(candidates[0][1])
+
+    for lbl, area, dist, _ in candidates:
+        if area < best_area * 0.25:
+            continue
+        if dist > plate_r * 0.90:
+            continue
+        out[labels == lbl] = 255
+
+    return out
 
 
 def _detect_plate_mask(img: np.ndarray, gray: np.ndarray, frame_idx: int) -> np.ndarray:
