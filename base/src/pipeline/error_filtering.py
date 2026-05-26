@@ -33,12 +33,12 @@ def filter_points(
 ) -> np.ndarray:
     if len(points_3d) == 0:
         return points_3d
-    """
+    
     # Pass 1: depth filter
     before = len(points_3d)
     points_3d = _depth_filter(points_3d, projections)
     print(f"    depth filter:        {before} -> {len(points_3d)} points")
-"""
+
     # Pass 2: orbital bounds filter — remove points outside the camera circle
     before = len(points_3d)
     points_3d = _orbital_bounds_filter(points_3d)

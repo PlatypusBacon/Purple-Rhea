@@ -67,7 +67,7 @@ def compute_visual_hull(images, projections, grid_resolution=80):
         depth = proj[:, 2]
 
         # Only project voxels in front of camera
-        valid = depth > 0
+        valid = depth > 0.02
         safe  = np.where(valid, depth, 1.0)
         px = (proj[:, 0] / safe).astype(int)
         py = (proj[:, 1] / safe).astype(int)
@@ -92,9 +92,9 @@ def compute_visual_hull(images, projections, grid_resolution=80):
         print(f"  frame {frame_idx:02d}: "
               f"in_bounds={n_in_bounds}  in_mask={n_in_mask}  "
               f"carve_votes_added={n_carve_votes}  "
-              f"px_range=[{px.min()}..{px.max()}]  "
-              f"py_range=[{py.min()}..{py.max()}]  "
-              f"depth_range=[{depth.min():.4f}..{depth.max():.4f}]")
+              f"px_range=[{px[valid].min()}..{px[valid].max()}]  "
+              f"py_range=[{py[valid].min()}..{py[valid].max()}]  "
+              f"depth_range=[{depth[valid].min():.4f}..{depth[valid].max():.4f}]")
 
         if n_in_bounds == 0:
             print(f"  [WARN] frame {frame_idx:02d}: ZERO voxels project inside image! "

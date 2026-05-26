@@ -127,6 +127,10 @@ def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[
               f"recovered C = {C_recover.round(4)}")
 
     print(f"\n[pose] All {len(projections)} projections computed.\n")
+    for i, P in enumerate(projections):
+        U, S, Vt = np.linalg.svd(P)
+        C = Vt[-1, :3] / Vt[-1, 3]
+        print(f"frame {i:02d} ({i*10}°): C = {C.round(3)}")
     return projections
 
 
@@ -269,11 +273,6 @@ DIST_COEFFS = np.zeros(5, dtype=np.float64)
 # --------------------------------------------------------------------------- #
 
 def _projection_for_pose_with_h(pose, K: np.ndarray, h: float) -> np.ndarray:
-    """
-    Build projection matrix for the given pose, using an explicit h (metres).
-    This is the corrected version that does NOT re-read pose.radius so the
-    caller's fallback logic is respected.
-    """
     servo_rad = math.radians(pose.servo_angle_deg)
     H     = config.CAMERA_HEIGHT
     horiz = math.sqrt(max(h**2 - H**2, 0.0))
@@ -284,29 +283,36 @@ def _projection_for_pose_with_h(pose, K: np.ndarray, h: float) -> np.ndarray:
         H,
     ], dtype=np.float64)
 
-    # Camera always points inward toward origin
-    forward  = -C / np.linalg.norm(C)
-    world_up = np.array([0., 0., 1.])
-    right    = np.cross(forward, world_up)
-    norm_r   = np.linalg.norm(right)
-    if norm_r < 1e-6:
-        # Camera pointing straight up/down — degenerate; use X as right
-        print(f"    [WARN] degenerate right vector (camera near zenith/nadir). "
-              f"forward={forward.round(4)}")
-        right = np.array([1., 0., 0.])
-    else:
-        right /= norm_r
-    down     = np.cross(right, forward)
-    down    /= np.linalg.norm(down)
-    R_world_to_cam = np.column_stack([right, down, forward]).T
+    pitch_down = math.atan2(H, horiz)
+    cos_s = math.cos(servo_rad)
+    sin_s = math.sin(servo_rad)
+    cos_p = math.cos(pitch_down)
+    sin_p = math.sin(pitch_down)
+
+    # X right: tangent to orbit, purely horizontal
+    right = np.array([cos_s, -sin_s, 0.0], dtype=np.float64)
+
+    # Z forward: from camera toward origin, pitched down
+    forward = np.array([-sin_s * cos_p, -cos_s * cos_p, sin_p], dtype=np.float64)
+
+    # Y down: completes right-handed frame — cross(right, forward) NOT cross(forward, right)
+    down = np.cross(forward, right)
+    # No re-orthogonalisation needed — right and forward are already orthogonal by construction
+
+    R_world_to_cam = np.stack([right, down, forward], axis=0)
+
+    # Verify determinant = +1 (proper rotation, not reflection)
+    det = np.linalg.det(R_world_to_cam)
+    depth_to_origin = float(np.dot(forward, -C))
+    print(f"    [proj] servo={pose.servo_angle_deg:.0f}°  "
+          f"pitch={math.degrees(pitch_down):.1f}°  "
+          f"det(R)={det:.4f}  depth_to_origin={depth_to_origin:.4f}m")
+    if abs(det - 1.0) > 0.01:
+        print(f"    [WARN] R is not a proper rotation! det={det:.4f}")
+    if depth_to_origin < 0:
+        print(f"    [WARN] camera pointing away from origin!")
 
     t = -R_world_to_cam @ C
-
-    print(f"    [proj] servo={pose.servo_angle_deg:.0f}°  "
-          f"pitch={pose.imu_pitch_deg:.1f}°  "
-          f"h={h:.4f}m  horiz={horiz:.4f}m  "
-          f"C={C.round(3)}  t={t.round(3)}")
-
     return K @ np.hstack([R_world_to_cam, t.reshape(3, 1)])
 
 
