@@ -1,7 +1,7 @@
 """
-Depth-Map Fusion — dense reconstruction via optical flow between adjacent views.
+Depth-Map Fusion — dense reconstruction via optical flow between views.
 
-For each consecutive pair of frames:
+For each pair of frames (separated by PAIR_STEPS):
   1. Compute dense optical flow (Farneback)
   2. Keep correspondences that fall inside the object mask in both views
   3. Triangulate to 3D using the two projection matrices
@@ -17,8 +17,9 @@ import config
 
 
 FLOW_SUBSAMPLE   = 4
-REPROJ_THRESH_PX = 3.0
-PAIR_STEP        = 1
+REPROJ_THRESH_PX = 4.0
+PAIR_STEPS       = [3, 6]
+DEBUG_DIR        = "output/depth_debug"
 
 
 def reconstruct_depth_fusion(images, projections, masks=None):
@@ -35,20 +36,25 @@ def reconstruct_depth_fusion(images, projections, masks=None):
         for i, (img, mask) in enumerate(zip(images, masks)):
             cv2.imwrite(f"output/silhouettes/mask_{i:02d}.png", mask)
 
+    os.makedirs(DEBUG_DIR, exist_ok=True)
+    _save_camera_centres(projections)
+
     all_pts = []
     all_col = []
 
-    for i in range(n):
-        j = (i + PAIR_STEP) % n
-        pts, col = _process_pair(
-            images[i], images[j],
-            projections[i], projections[j],
-            masks[i], masks[j],
-            i, j,
-        )
-        if len(pts) > 0:
-            all_pts.append(pts)
-            all_col.append(col)
+    for step in PAIR_STEPS:
+        print(f"\n[depth] === Pair step {step} ({step * config.STEP_DEGREES:.0f}°) ===")
+        for i in range(n):
+            j = (i + step) % n
+            pts, col = _process_pair(
+                images[i], images[j],
+                projections[i], projections[j],
+                masks[i], masks[j],
+                i, j,
+            )
+            if len(pts) > 0:
+                all_pts.append(pts)
+                all_col.append(col)
 
     if not all_pts:
         print("[depth] WARNING: no points from any pair")
@@ -63,6 +69,28 @@ def reconstruct_depth_fusion(images, projections, masks=None):
 
     print(f"[depth] Final cloud: {len(points)} points\n")
     return points, colors
+
+
+def _save_camera_centres(projections):
+    """Write camera centres to a debug PLY so you can visually check the orbit."""
+    path = os.path.join(DEBUG_DIR, "cameras.ply")
+    centres = []
+    for P in projections:
+        U, S, Vt = np.linalg.svd(P)
+        C = Vt[-1, :3] / Vt[-1, 3]
+        centres.append(C)
+    centres = np.array(centres)
+    with open(path, "w") as f:
+        f.write(f"ply\nformat ascii 1.0\nelement vertex {len(centres)}\n"
+                "property float x\nproperty float y\nproperty float z\n"
+                "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+                "end_header\n")
+        for c in centres:
+            f.write(f"{c[0]:.6f} {c[1]:.6f} {c[2]:.6f} 255 0 0\n")
+    print(f"[depth] Camera centres saved to {path}")
+    print(f"[depth] Centre range: X=[{centres[:,0].min():.4f},{centres[:,0].max():.4f}] "
+          f"Y=[{centres[:,1].min():.4f},{centres[:,1].max():.4f}] "
+          f"Z=[{centres[:,2].min():.4f},{centres[:,2].max():.4f}]")
 
 
 def _process_pair(img1, img2, P1, P2, mask1, mask2, idx1, idx2):
@@ -87,6 +115,13 @@ def _process_pair(img1, img2, P1, P2, mask1, mask2, idx1, idx2):
 
     dx = flow[ys, xs, 0]
     dy = flow[ys, xs, 1]
+
+    median_mag = np.median(np.sqrt(dx**2 + dy**2))
+    print(f"  pair {idx1:02d}-{idx2:02d}: median flow magnitude = {median_mag:.1f} px")
+
+    if config.DEBUG_VIZ:
+        _save_flow_debug(flow, mask1, img1, idx1, idx2)
+
     xs2 = (xs + dx).astype(np.float64)
     ys2 = (ys + dy).astype(np.float64)
 
@@ -112,15 +147,31 @@ def _process_pair(img1, img2, P1, P2, mask1, mask2, idx1, idx2):
 
     X3d = (X4d[:3] / X4d[3]).T
 
-    # Reprojection filter
     keep = _reproj_filter(X3d, pts1.T, pts2.T, P1, P2, REPROJ_THRESH_PX)
     X3d = X3d[keep]
     xs_g, ys_g = xs_g[keep], ys_g[keep]
 
     colors = img1[ys_g.astype(int), xs_g.astype(int)]
 
-    print(f"  pair {idx1:02d}-{idx2:02d}: {len(xs)} corr → {len(X3d)} points after reproj filter")
+    if len(X3d) > 0:
+        dist_to_origin = np.linalg.norm(X3d, axis=1)
+        print(f"  pair {idx1:02d}-{idx2:02d}: {len(xs[good_w])} corr → {len(X3d)} pts  "
+              f"dist_to_origin=[{dist_to_origin.min():.4f}, {dist_to_origin.median() if False else np.median(dist_to_origin):.4f}, {dist_to_origin.max():.4f}]")
+    else:
+        print(f"  pair {idx1:02d}-{idx2:02d}: 0 points after reproj filter")
+
     return X3d, colors
+
+
+def _save_flow_debug(flow, mask, img, idx1, idx2):
+    mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+    hsv = np.zeros((*mag.shape, 3), dtype=np.uint8)
+    hsv[..., 0] = ang * 180 / np.pi / 2
+    hsv[..., 1] = 255
+    hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    flow_bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    flow_bgr[mask == 0] = 0
+    cv2.imwrite(os.path.join(DEBUG_DIR, f"flow_{idx1:02d}_{idx2:02d}.png"), flow_bgr)
 
 
 def _reproj_filter(X3d, uv1, uv2, P1, P2, thresh):
