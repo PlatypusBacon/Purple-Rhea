@@ -14,10 +14,10 @@ from flask import Flask, Response, jsonify, request, send_from_directory, send_f
 
 import config
 
-OUTPUT_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "output")
-FRAMES_DIR = os.path.join(OUTPUT_ROOT, "frames")
-MESH_DIR = os.path.join(OUTPUT_ROOT, "mesh")
-POINT_DIR = os.path.join(OUTPUT_ROOT, "point")
+OUTPUT_ROOT = config.OUTPUT_DIR
+FRAMES_DIR = config.IMAGE_CACHE
+MESH_DIR = config.OUTPUT_DIR
+POINT_DIR = config.OUTPUT_DIR
 
 app = Flask(__name__, static_folder="web/static", static_url_path="/static")
 
@@ -178,24 +178,22 @@ def api_result_download():
 @app.route("/api/result/points")
 def api_result_points():
     """Return point cloud as JSON for the 3D viewer."""
-    if not os.path.isdir(POINT_DIR):
-        return jsonify({"error": "No point cloud available"}), 404
+    import numpy as np
+    npy_path = os.path.join(POINT_DIR, "reconstruction_raw.npy")
+    if os.path.isfile(npy_path):
+        pts = np.load(npy_path)
+        return jsonify(pts.tolist())
 
-    for name in sorted(os.listdir(POINT_DIR)):
-        path = os.path.join(POINT_DIR, name)
-        if name.endswith(".npy"):
-            import numpy as np
-            pts = np.load(path)
-            return jsonify(pts.tolist())
-        if name.endswith(".obj"):
-            points = []
-            with open(path) as f:
-                for line in f:
-                    if line.startswith("v "):
-                        parts = line.split()
-                        points.append([float(parts[1]), float(parts[2]), float(parts[3])])
-            if points:
-                return jsonify(points)
+    obj_path = os.path.join(POINT_DIR, "reconstruction.obj")
+    if os.path.isfile(obj_path):
+        points = []
+        with open(obj_path) as f:
+            for line in f:
+                if line.startswith("v "):
+                    parts = line.split()
+                    points.append([float(parts[1]), float(parts[2]), float(parts[3])])
+        if points:
+            return jsonify(points)
 
     return jsonify({"error": "No point cloud available"}), 404
 
@@ -203,26 +201,24 @@ def api_result_points():
 @app.route("/api/result/mesh")
 def api_result_mesh():
     """Return mesh vertices and faces as JSON for the 3D viewer."""
-    if not os.path.isdir(MESH_DIR):
+    mesh_path = os.path.join(MESH_DIR, "reconstruction_mesh.obj")
+    if not os.path.isfile(mesh_path):
         return jsonify({"error": "No mesh available"}), 404
 
-    for name in sorted(os.listdir(MESH_DIR)):
-        if name.endswith(".obj"):
-            verts = []
-            faces = []
-            with open(os.path.join(MESH_DIR, name)) as f:
-                for line in f:
-                    if line.startswith("v "):
-                        parts = line.split()
-                        verts.append([float(parts[1]), float(parts[2]), float(parts[3])])
-                    elif line.startswith("f "):
-                        parts = line.split()[1:]
-                        face = [int(p.split("/")[0]) - 1 for p in parts]
-                        faces.append(face)
-            if verts:
-                return jsonify({"vertices": verts, "faces": faces})
-
-    return jsonify({"error": "No mesh available"}), 404
+    verts = []
+    faces = []
+    with open(mesh_path) as f:
+        for line in f:
+            if line.startswith("v "):
+                parts = line.split()
+                verts.append([float(parts[1]), float(parts[2]), float(parts[3])])
+            elif line.startswith("f "):
+                parts = line.split()[1:]
+                face = [int(p.split("/")[0]) - 1 for p in parts]
+                faces.append(face)
+    if not verts:
+        return jsonify({"error": "No mesh available"}), 404
+    return jsonify({"vertices": verts, "faces": faces})
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
