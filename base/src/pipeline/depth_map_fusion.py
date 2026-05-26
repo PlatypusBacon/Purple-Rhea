@@ -30,8 +30,9 @@ def reconstruct_depth_fusion(images, projections, masks=None):
     n = len(images)
 
     if masks is None:
-        print(f"\n[depth] Building projection-based masks for {n} images...")
-        masks = [_project_disk_mask(img, P, i) for i, (img, P) in
+        print(f"\n[depth] Building masks for {n} images...")
+        plate_ellipse = _compute_average_ellipse(images)
+        masks = [_project_disk_mask(img, P, i, plate_ellipse) for i, (img, P) in
                  enumerate(zip(images, projections))]
 
     os.makedirs(DEBUG_DIR, exist_ok=True)
@@ -169,90 +170,106 @@ def _save_flow_debug(flow, mask, img, idx1, idx2):
     cv2.imwrite(os.path.join(DEBUG_DIR, f"flow_{idx1:02d}_{idx2:02d}.png"), flow_bgr)
 
 
-BRIGHTNESS_THRESH = 40
+def _detect_plate_ellipse(img):
+    """Detect the turntable plate ellipse in a single frame. Returns ellipse or None."""
+    h_img, w_img = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (15, 15), 0)
 
-def _project_disk_mask(img, P, frame_idx):
+    _, dark_mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    erode_k = np.ones((25, 25), np.uint8)
+    eroded = cv2.erode(dark_mask, erode_k, iterations=1)
+
+    n_comp, labels, stats, centroids = cv2.connectedComponentsWithStats(eroded)
+
+    img_cx, img_cy = w_img / 2, h_img / 2
+    best_idx = -1
+    best_score = -1
+    for c in range(1, n_comp):
+        area = stats[c, cv2.CC_STAT_AREA]
+        if area < 10000:
+            continue
+        cx, cy = centroids[c]
+        dist = np.sqrt((cx - img_cx)**2 + (cy - img_cy)**2)
+        score = area / (1 + dist)
+        if score > best_score:
+            best_score = score
+            best_idx = c
+
+    if best_idx <= 0:
+        return None
+
+    plate_eroded = (labels == best_idx).astype(np.uint8) * 255
+    cnts, _ = cv2.findContours(plate_eroded, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if cnts and len(cnts[0]) >= 5:
+        return cv2.fitEllipse(cnts[0])
+    return None
+
+
+def _compute_average_ellipse(images):
+    """Detect plate ellipse in each frame, return the median ellipse."""
+    ellipses = []
+    for img in images:
+        e = _detect_plate_ellipse(img)
+        if e is not None:
+            ellipses.append(e)
+
+    if not ellipses:
+        return None
+
+    centres = np.array([(e[0][0], e[0][1]) for e in ellipses])
+    axes = np.array([(e[1][0], e[1][1]) for e in ellipses])
+    angles = np.array([e[2] for e in ellipses])
+
+    med_centre = (float(np.median(centres[:, 0])), float(np.median(centres[:, 1])))
+    med_axes = (float(np.median(axes[:, 0])), float(np.median(axes[:, 1])))
+    med_angle = float(np.median(angles))
+
+    print(f"  [mask] averaged ellipse from {len(ellipses)}/{len(images)} frames: "
+          f"centre=({med_centre[0]:.0f},{med_centre[1]:.0f}) "
+          f"axes=({med_axes[0]:.0f},{med_axes[1]:.0f}) angle={med_angle:.1f}°")
+
+    return (med_centre, med_axes, med_angle)
+
+
+def _project_disk_mask(img, P, frame_idx, plate_ellipse=None):
     """
-    Two-stage mask:
-      1. Geometric: project disk cylinder to get the region of interest
-      2. Appearance: within that region, keep only non-dark pixels
-         (the cube is colorful; the plate and background are dark)
+    Mask the turntable plate region (plate + object), excluding the bright background.
+    Uses a pre-computed plate ellipse if provided, otherwise detects per-frame.
     """
     h_img, w_img = img.shape[:2]
-    R = config.RIG_BASE_LENGTH
-    z_lo = config.VOXEL_Z_MIN
-    z_hi = config.VOXEL_Z_MAX
-    N_SAMPLES = 360
 
-    angles = np.linspace(0, 2 * np.pi, N_SAMPLES, endpoint=False)
-    cx_ring = R * np.cos(angles)
-    cy_ring = R * np.sin(angles)
+    if plate_ellipse is not None:
+        ellipse = plate_ellipse
+    else:
+        ellipse = _detect_plate_ellipse(img)
 
-    bottom = np.column_stack([cx_ring, cy_ring,
-                              np.full(N_SAMPLES, z_lo),
-                              np.ones(N_SAMPLES)])
-    top = np.column_stack([cx_ring, cy_ring,
-                           np.full(N_SAMPLES, z_hi),
-                           np.ones(N_SAMPLES)])
-    world_pts = np.vstack([bottom, top])
-
-    proj = (P @ world_pts.T).T
-    d = proj[:, 2]
-    valid = d > 1e-6
-    if valid.sum() < 5:
-        print(f"  [mask {frame_idx:02d}] cylinder projection failed")
-        return np.zeros((h_img, w_img), dtype=np.uint8)
-
-    px = proj[valid, 0] / d[valid]
-    py = proj[valid, 1] / d[valid]
-
-    pts_2d = np.stack([px, py], axis=1).astype(np.float32)
-    hull = cv2.convexHull(pts_2d.reshape(-1, 1, 2))
-
-    geo_mask = np.zeros((h_img, w_img), dtype=np.uint8)
-    cv2.fillConvexPoly(geo_mask, hull.astype(np.int32), 255)
-
-    # Brightness filter: keep pixels that aren't dark
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    bright = (gray > BRIGHTNESS_THRESH).astype(np.uint8) * 255
-
-    # Also keep high-saturation pixels (colored cube faces can be dim but saturated)
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    saturated = (hsv[:, :, 1] > 50).astype(np.uint8) * 255
-
-    appearance = cv2.bitwise_or(bright, saturated)
-
-    # Combine: must be inside geometry AND pass appearance
-    mask = cv2.bitwise_and(geo_mask, appearance)
-
-    # Dilate to bridge dark gaps between cube stickers
-    bridge = np.ones((15, 15), np.uint8)
-    dilated = cv2.dilate(mask, bridge, iterations=2)
-
-    # Find largest connected component and fill its convex hull
-    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     mask = np.zeros((h_img, w_img), dtype=np.uint8)
-    if contours:
-        biggest = max(contours, key=cv2.contourArea)
-        hull = cv2.convexHull(biggest)
-        cv2.fillConvexPoly(mask, hull, 255)
-
-    # Re-intersect with geometry to stay within projected bounds
-    mask = cv2.bitwise_and(mask, geo_mask)
+    if ellipse is not None:
+        cv2.ellipse(mask, ellipse, 255, -1)
+    else:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (15, 15), 0)
+        _, mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
     mask_px = int(mask.sum() // 255)
-    geo_px = int(geo_mask.sum() // 255)
-    print(f"  [mask {frame_idx:02d}] geo={geo_px}px → appearance={mask_px}px "
+    print(f"  [mask {frame_idx:02d}] plate+cube mask: {mask_px} px "
           f"({100*mask_px/(h_img*w_img):.1f}% of image)")
 
+    _save_mask_debug(img, mask, frame_idx)
+    return mask
+
+
+def _save_mask_debug(img, mask, frame_idx):
     os.makedirs("output/silhouettes", exist_ok=True)
     cv2.imwrite(f"output/silhouettes/mask_{frame_idx:02d}.png", mask)
     debug = img.copy()
     debug[mask == 0] = (debug[mask == 0] * 0.3).astype(np.uint8)
-    cv2.drawContours(debug, [hull.astype(np.int32)], 0, (0, 255, 0), 2)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        cv2.drawContours(debug, contours, -1, (0, 255, 0), 2)
     cv2.imwrite(f"output/silhouettes/debug_{frame_idx:02d}.jpg", debug)
-
-    return mask
 
 
 def _reproj_filter(X3d, uv1, uv2, P1, P2, thresh):
