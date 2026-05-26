@@ -13,7 +13,7 @@ const char *ssid = "Jgggggg";
 const char *password = "Jg200311";
 
 // MQTT config
-const char* mqttServer = "10.134.99.217";
+const char* mqttServer = "10.133.32.146";
 const char* HostName = "ESP32-CAM";
 const char* mqttUser = "47484333";
 const char* mqttPassword = "47484333";
@@ -24,9 +24,9 @@ const int MAX_PAYLOAD = 60000;
 
 bool flash = true;
 
-// Tracker UART
-#define TRACKER_RX_PIN  14
-#define TRACKER_TX_PIN  15
+// Tracker UART (GPIO 14/15 conflict with SD card on AI-Thinker)
+#define TRACKER_RX_PIN  13
+#define TRACKER_TX_PIN  -1
 #define TRACKER_BAUD    115200
 
 HardwareSerial TrackerSerial(1);        // UART1
@@ -309,9 +309,22 @@ void setup() {
   client.setCallback(callback);
 }
 
+static uint32_t uart_debug_timer = 0;
+static uint32_t uart_bytes_seen = 0;
+
 void loop() {
     if (!client.connected()) reconnect();
-    try_read_pose();   // drain UART each loop
+
+    int avail = TrackerSerial.available();
+    if (avail > 0) uart_bytes_seen += avail;
+
+    if (millis() - uart_debug_timer > 2000) {
+        Serial.printf("[UART debug] bytes_seen=%u  available=%d\n",
+                      uart_bytes_seen, TrackerSerial.available());
+        uart_debug_timer = millis();
+    }
+
+    try_read_pose();
     client.loop();
     delay(10);
 }
