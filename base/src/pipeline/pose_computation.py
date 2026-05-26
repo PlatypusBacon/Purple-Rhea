@@ -94,25 +94,30 @@ def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[
             else:
                 print(f"  frame {frame.index:02d}: computed h={h:.4f}m from pitch={pose.imu_pitch_deg:.1f}°")
 
-        H     = config.CAMERA_HEIGHT
-        horiz = math.sqrt(max(h**2 - H**2, 0.0))
+        if abs(pose.imu_pitch_deg) > 1.0:
+            theta = math.radians(pose.imu_pitch_deg)
+        else:
+            H_cfg = config.CAMERA_HEIGHT
+            horiz_cfg = math.sqrt(max(h**2 - H_cfg**2, 0.0))
+            theta = math.atan2(H_cfg, horiz_cfg)
 
+        horiz = h * math.cos(theta)
         Cx = horiz * math.sin(servo_rad)
         Cy = horiz * math.cos(servo_rad)
-        Cz = H
+        Cz = h * math.sin(theta)
 
         print(f"  frame {frame.index:02d}: "
               f"servo={pose.servo_angle_deg:.1f}°  "
               f"imu_yaw={pose.imu_yaw_deg:.1f}°  "
               f"imu_pitch={pose.imu_pitch_deg:.1f}°  "
+              f"theta={math.degrees(theta):.1f}°  "
               f"h={h:.4f}m  horiz={horiz:.4f}m  "
               f"C=[{Cx:.4f}, {Cy:.4f}, {Cz:.4f}]")
 
-        # Sanity check: camera should not be at the origin
         C = np.array([Cx, Cy, Cz])
         if np.linalg.norm(C) < 0.01:
             print(f"  [WARN] frame {frame.index:02d}: camera centre is near origin! "
-                  f"Check radius/height values. h={h:.4f}, H={H:.4f}, horiz={horiz:.4f}")
+                  f"Check radius/height values. h={h:.4f}, horiz={horiz:.4f}")
 
         P = _projection_for_pose_with_h(pose, K, h)
         projections.append(P)
@@ -264,82 +269,47 @@ DIST_COEFFS = np.zeros(5, dtype=np.float64)
 
 def _projection_for_pose_with_h(pose, K: np.ndarray, h: float) -> np.ndarray:
     """
-    Build projection matrix for the given pose.
-    
-    Camera orbits the origin at azimuth = servo_angle_deg, at a slant
-    distance h from the origin. Its height is CAMERA_HEIGHT, so the
-    horizontal distance is horiz = sqrt(h² - H²).
-    
-    The camera is tilted DOWN toward the origin: pitch = arctan(H / horiz).
-    Azimuth is the servo angle (rotation about world Z).
+    Build projection matrix P = K [R | t] for one frame.
+
+    Coordinate system (consistent across all files):
+      - Origin: centre of turntable plate
+      - Z axis: up
+      - At servo_angle=0 the camera sits on the +Y axis
+
+    theta = IMU pitch = angle below horizontal (positive = looking down).
+    h     = slant distance from camera to the world origin.
+
+    Camera position:  C = h · [cos θ · sin a,  cos θ · cos a,  sin θ]
+    Optical axis:     radial inward at angle θ below horizontal.
     """
-    servo_rad = math.radians(pose.servo_angle_deg)
-    H     = config.CAMERA_HEIGHT
-    horiz = math.sqrt(max(h**2 - H**2, 0.0))
+    a = math.radians(pose.servo_angle_deg)
 
-    # Camera centre in world space
-    C = np.array([
-        horiz * math.sin(servo_rad),
-        horiz * math.cos(servo_rad),
-        H,
-    ], dtype=np.float64)
+    if abs(pose.imu_pitch_deg) > 1.0:
+        theta = math.radians(pose.imu_pitch_deg)
+    else:
+        H = config.CAMERA_HEIGHT
+        horiz = math.sqrt(max(h**2 - H**2, 0.0))
+        theta = math.atan2(H, horiz)
 
-    # Tilt angle downward from horizontal toward the origin
-    pitch_down = math.atan2(H, horiz)   # positive = tilting down
+    cos_a, sin_a = math.cos(a), math.sin(a)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
 
-    # --- Build R as: first rotate around world-Z by servo_angle (azimuth),
-    #     then tilt down by pitch_down around the camera's local X axis.
-    #
-    # In the camera's "facing outward at 0°" frame:
-    #   camera X = world X  (points right along the orbit tangent)
-    #   camera Y = world Z  (points up — becomes "up" in image before tilt)
-    #   camera Z = world Y  (points away from origin — optical axis pre-tilt)
-    #
-    # After azimuth rotation by servo_rad:
-    #   right_world = [ cos(servo),  -sin(servo), 0 ]
-    #   (tangent to the orbit circle, pointing camera-right)
-    #
-    # After pitch (tilt down): optical axis tips toward the ground.
+    C = h * np.array([cos_t * sin_a, cos_t * cos_a, sin_t], dtype=np.float64)
 
-    cos_s = math.cos(servo_rad)
-    sin_s = math.sin(servo_rad)
-    cos_p = math.cos(pitch_down)
-    sin_p = math.sin(pitch_down)
+    # OpenCV camera axes in world coordinates (X=right, Y=down, Z=forward).
+    # Derived by placing the camera on +Y at a=0 then rotating about Z.
+    right   = np.array([-cos_a,          sin_a,          0.0   ], dtype=np.float64)
+    down    = np.array([ sin_a * sin_t,  cos_a * sin_t, -cos_t ], dtype=np.float64)
+    forward = np.array([-sin_a * cos_t, -cos_a * cos_t, -sin_t ], dtype=np.float64)
 
-    # Camera right = tangent to orbit (perpendicular to radial direction, in XY plane)
-    right = np.array([ cos_s, -sin_s, 0.0], dtype=np.float64)
+    R = np.stack([right, down, forward], axis=0)
+    t = -R @ C
 
-    # Camera forward AFTER pitch: starts pointing outward (+Y rotated by servo),
-    # then pitched down by pitch_down
-    #   pre-pitch forward (radial outward) = [-sin_s, -cos_s, 0]  (points TO origin, negated)
-    #   but we want the camera to look AT the origin, so forward = inward = [sin_s, cos_s, 0]
-    #   pitched down: forward.z -= sin_p, forward.xy *= cos_p
-    forward = np.array([
-         sin_s * cos_p,
-         cos_s * cos_p,
-        -sin_p,           # negative Z = downward in world (Z up convention)
-    ], dtype=np.float64)
-
-    # Camera down = cross(right, forward)  [in a right-handed R,D,F camera frame]
-    down = np.cross(right, forward)
-    down /= np.linalg.norm(down)
-
-    # Re-orthogonalise forward against right (numerical safety)
-    forward = np.cross(down, right)   # RDF: F = D×R ... wait, RDF: R×D = -F, so F = -(R×D)
-    # Actually in a right-handed camera (X right, Y down, Z forward):
-    #   Z = X × Y  →  forward = cross(right, down)
-    forward = np.cross(right, down)
-    forward /= np.linalg.norm(forward)
-
-    # Rows of R_world_to_cam: [right; down; forward]
-    R_world_to_cam = np.stack([right, down, forward], axis=0)  # (3,3)
-
-    t = -R_world_to_cam @ C
-
+    horiz = h * cos_t
     print(f"    [proj] servo={pose.servo_angle_deg:.0f}°  "
-          f"pitch_down={math.degrees(pitch_down):.1f}°  "
+          f"theta={math.degrees(theta):.1f}°  "
           f"h={h:.4f}m  horiz={horiz:.4f}m  "
           f"C={C.round(3)}  t={t.round(3)}")
 
-    return K @ np.hstack([R_world_to_cam, t.reshape(3, 1)])
+    return K @ np.hstack([R, t.reshape(3, 1)])
 

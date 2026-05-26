@@ -17,7 +17,7 @@ VOXEL_Z_MAX     = 0.22      # metres above turntable surface
 # ── Camera / MQTT ─────────────────────────────────────────────────────────────
 IMAGE_WIDTH  = 1600
 IMAGE_HEIGHT = 1200
-MQTT_BROKER  = "10.48.233.146"
+MQTT_BROKER  = "10.133.32.146"
 MQTT_PORT    = 1883
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
