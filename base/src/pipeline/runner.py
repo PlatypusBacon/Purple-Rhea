@@ -51,7 +51,7 @@ def run(session: ScanSession, on_progress=None) -> str:
     mesh_path = os.path.join(config.MESH_DIR, "reconstruction.obj")
     if config.RUN_SURFACE_RECON:
         from pipeline.surface import reconstruct_surface
-        mesh_path = reconstruct_surface(points_3d, point_path, projections)
+        mesh_path = reconstruct_surface(points_3d, mesh_path, projections)
         _progress("[5/5] Surface reconstruction done")
         print(f"  Mesh: {mesh_path}")
 
