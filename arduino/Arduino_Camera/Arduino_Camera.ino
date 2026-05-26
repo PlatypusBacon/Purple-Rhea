@@ -24,6 +24,14 @@ const int MAX_PAYLOAD = 60000;
 
 bool flash = true;
 
+// Tracker UART — RX on GPIO 13 (SD card pin, but SD not used)
+#define TRACKER_RX_PIN  13
+#define TRACKER_TX_PIN  -1
+#define TRACKER_BAUD    115200
+
+HardwareSerial TrackerSerial(1);        // UART1
+static TrackerPose latest_pose = TrackerPose_init_zero;
+
 WiFiClient espClient;
 PubSubClient client(espClient);
 
@@ -131,6 +139,8 @@ void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(true);
   Serial.println();
+  TrackerSerial.begin(TRACKER_BAUD, SERIAL_8N1, TRACKER_RX_PIN, TRACKER_TX_PIN);
+  Serial.printf("Tracker UART RX on GPIO %d @ %d baud\n", TRACKER_RX_PIN, TRACKER_BAUD);
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -226,9 +236,18 @@ void setup() {
   client.setCallback(callback);
 }
 
+static uint32_t dbg_timer = 0;
+
 void loop() {
     if (!client.connected()) reconnect();
-    try_read_pose();   // drain UART each loop
+    if (try_read_pose()) {
+        Serial.printf("[POSE] yaw=%.1f pitch=%.1f roll=%.1f\n",
+            (double)latest_pose.yaw, (double)latest_pose.pitch, (double)latest_pose.roll);
+    }
+    if (millis() - dbg_timer > 3000) {
+        Serial.printf("[DBG] tracker_avail=%d\n", TrackerSerial.available());
+        dbg_timer = millis();
+    }
     client.loop();
     delay(10);
 }
