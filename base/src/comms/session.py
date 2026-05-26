@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import threading
 import time
-import math
 import cv2
 import numpy as np
 import lgpio
 import paho.mqtt.client as mqtt
+import os
 
 import config
 from storage.scan_session import ScanSession, ScanFrame, CameraPose
@@ -42,17 +42,25 @@ _STEP_SEQ = (
     (1, 0, 0, 1),
 )
 
-# 28BYJ-48 via ULN2003: 2048 half-steps per full revolution
-# (stride angle 5.625° / 64 gear ratio = 512 full steps = 2048 half-steps)
-_STEPS_PER_REV = 2048
-_STEPS_PER_DEGREE = _STEPS_PER_REV / 360.0
+# 28BYJ-48 half-step output
+_STEPS_PER_REV = 4096
+
+# External gear reduction on the turntable
+_DRIVER_TEETH = 15
+_DRIVEN_TEETH = 115
+_GEAR_RATIO   = _DRIVEN_TEETH / _DRIVER_TEETH          # 7.6667
+
+# Half-steps needed to rotate the OUTPUT gear one full revolution
+_STEPS_PER_OUTPUT_REV = _STEPS_PER_REV * _GEAR_RATIO   # ~31 403
+
+_STEPS_PER_DEGREE = _STEPS_PER_OUTPUT_REV / 360.0      # ~87.2
 
 
-def _step_motor(chip: int, n_steps: int) -> None:
-    """Advance the motor n_steps half-steps in the positive direction."""
+def _step_motor(chip: int, n_steps: int, phase: int = 0) -> int:
+    """Advance the motor n_steps half-steps. Returns the next phase index."""
     next_t = time.perf_counter()
-    for i in range(n_steps):
-        pattern = _STEP_SEQ[i % len(_STEP_SEQ)]
+    for _ in range(n_steps):
+        pattern = _STEP_SEQ[phase]
         for pin, value in zip(_PINS, pattern):
             lgpio.gpio_write(chip, pin, value)
         next_t += _STEP_DELAY_S
@@ -61,6 +69,8 @@ def _step_motor(chip: int, n_steps: int) -> None:
             time.sleep(sleep)
         else:
             next_t = time.perf_counter()
+        phase = (phase + 1) % 8
+    return phase
 
 
 def _motor_off(chip: int) -> None:
@@ -70,8 +80,6 @@ def _motor_off(chip: int) -> None:
 
 
 # ── MQTT helpers ───────────────────────────────────────────────────────────────
-# Topics from ESP32-CAM firmware (kept separate from config.py MQTT topics
-# so neither file needs editing if you change one side independently).
 _TOPIC_TRIGGER  = "SMILE"    # publish → ESP32-CAM takes a photo
 _TOPIC_IMAGE    = "PICTURE"  # subscribe → ESP32-CAM sends JPEG bytes
 
@@ -82,6 +90,11 @@ class _ImageWaiter:
     def __init__(self) -> None:
         self._event = threading.Event()
         self._data: bytes | None = None
+
+    def flush(self) -> None:
+        """Discard any image that arrived before we were ready for it."""
+        self._event.clear()
+        self._data = None
 
     def set(self, data: bytes) -> None:
         self._data = data
@@ -104,6 +117,14 @@ def start_session() -> ScanSession:
     Capture TOTAL_FRAMES images at STEP_DEGREES intervals via the ESP32-CAM
     and stepper motor, returning a fully populated ScanSession.
     """
+    # Clear existing jpegs from the cache dir without removing the dir itself
+    if os.path.isdir(config.IMAGE_CACHE):
+        for fname in os.listdir(config.IMAGE_CACHE):
+            fpath = os.path.join(config.IMAGE_CACHE, fname)
+            if os.path.isfile(fpath):
+                os.remove(fpath)
+        print(f"[start_session] cleared {config.IMAGE_CACHE}")
+
     session = ScanSession()
     waiter  = _ImageWaiter()
 
@@ -115,27 +136,28 @@ def start_session() -> ScanSession:
 
     mqttc = mqtt.Client(client_id="rpi-scanner", protocol=mqtt.MQTTv311)
     mqttc.on_message = _on_message
-
-    # Use credentials from ESP32-CAM firmware if broker requires auth
     mqttc.username_pw_set("47484333", "47484333")
 
     mqttc.connect(config.MQTT_BROKER, config.MQTT_PORT, keepalive=60)
     mqttc.subscribe(_TOPIC_IMAGE, qos=0)
-    mqttc.loop_start()          # background thread handles network I/O
+    mqttc.loop_start()
 
     # ── lgpio stepper setup ────────────────────────────────────────────────
     chip = lgpio.gpiochip_open(0)
     for pin in _PINS:
         lgpio.gpio_claim_output(chip, pin, 0)
 
-    steps_per_frame = round(_STEPS_PER_DEGREE * config.STEP_DEGREES)
+    steps_per_frame_f = _STEPS_PER_DEGREE * config.STEP_DEGREES  # ~872.6 — keep fractional
+    _motor_phase      = 0    # continuous phase across all increments
+    _accumulator      = 0.0  # fractional-step accumulator to prevent drift
 
     try:
         for i in range(config.TOTAL_FRAMES):
             angle_deg = i * config.STEP_DEGREES
             print(f"\n[Frame {i:02d}/{config.TOTAL_FRAMES}]  angle={angle_deg:.1f}°")
 
-            # 1. Trigger camera
+            # 1. Flush any stale image, then trigger camera
+            waiter.flush()
             mqttc.publish(_TOPIC_TRIGGER, payload=b"1", qos=0)
             print("  [MQTT] trigger sent")
 
@@ -151,26 +173,29 @@ def start_session() -> ScanSession:
             _, enc = cv2.imencode(".jpg", img)
             del img, buf
 
-            # 4. Build pose & frame, add to session
+            # 4. Build pose & frame, add to session, save jpeg to cache
             pose = CameraPose.bedug_data(
                 servo_angle_deg=angle_deg,
                 radius=config.NOMINAL_RADIUS,
             )
-            session.add_frame(
-                ScanFrame(index=i, image_bytes=enc.tobytes(), pose=pose)
-            )
+            frame = ScanFrame(index=i, image_bytes=enc.tobytes(), pose=pose)
+            session.add_frame(frame)
+            frame.save_jpeg(config.IMAGE_CACHE)
             del enc
 
             print(f"  [Session] frame {i} stored  "
                   f"({len(session)}/{config.TOTAL_FRAMES} total)")
 
-            # 5. Advance motor (skip after last frame — no need to step back)
+            # 5. Advance motor (skip after last frame)
             if i < config.TOTAL_FRAMES - 1:
-                print(f"  [Motor] stepping {config.STEP_DEGREES:.0f}° "
-                      f"({steps_per_frame} half-steps)…")
-                _step_motor(chip, steps_per_frame)
+                print(f"  [Motor] stepping {config.STEP_DEGREES:.0f}° …")
+                _accumulator += steps_per_frame_f
+                n = int(_accumulator)
+                _accumulator -= n
+                _motor_phase = _step_motor(chip, n, _motor_phase)
                 _motor_off(chip)
-            time.sleep(2.0)
+
+            time.sleep(1.0)
 
     finally:
         _motor_off(chip)
