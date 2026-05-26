@@ -9,7 +9,14 @@ from storage.scan_session import ScanSession, ScanFrame, CameraPose
 from pipeline.pose_computation import compute_camera_distance
 # reuse the BLE classes from your main session module
 from comms.session import BLEPoseClient, _YawFusion, _ImuFilter, _wrap_deg180
+import math
 
+def _safe_float(value: float, fallback: float = 0.0, 
+                lo: float = -1e6, hi: float = 1e6) -> float:
+    """Return value if finite and in range, else fallback."""
+    if not math.isfinite(value) or value < lo or value > hi:
+        return fallback
+    return value
 
 def start_disk_ble_session(on_frame_captured=None) -> ScanSession:
     """
@@ -45,10 +52,16 @@ def start_disk_ble_session(on_frame_captured=None) -> ScanSession:
             del img, buf, raw
 
             # 2. BLE pose — same as live session
-            print("  [BLE] requesting pose...")
-            pose_proto = ble.request_pose(timeout=5.0)
-            print(f"  [BLE] got pose — frame={pose_proto.frame_index} "
-                  f"yaw={pose_proto.yaw:.1f}° pitch={pose_proto.pitch:.1f}°")
+            pose_proto = ble.get_latest_pose()
+
+            # Sanity check only — should never be wild with pure accel
+            pitch_deg = pose_proto.pitch
+            if not math.isfinite(pitch_deg) or not (-90.0 <= pitch_deg <= 90.0):
+                print(f"  [WARN] bad pitch {pitch_deg} — using 0.0")
+                pitch_deg = 0.0
+
+            print(f"  [BLE] pitch={pitch_deg:.1f}°")
+            radius = compute_camera_distance(pitch_deg)
 
             if last_frame_idx is not None and pose_proto.frame_index == last_frame_idx:
                 print(f"  [WARN] pose frame_index did not advance "

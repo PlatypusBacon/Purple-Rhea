@@ -70,77 +70,37 @@ static void send_pose_uart(float roll, float pitch, float yaw,
 
 void processing_thread_entry(void *p1, void *p2, void *p3)
 {
-	ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
-	k_msleep(3000);
-	if (imu_init() != 0) {
-		LOG_ERR("imu_init failed — thread exiting");
-		return;
-	}
-    LOG_INF("uart1 ready");
-	fusion_init();
-	zupt_init();
-	ble_pose_init();
-	radius_init();
+    ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
+    k_msleep(3000);
 
-	const float dt = 1.0f / (float)SAMPLE_HZ;
-	int settle = 0;
-	bool yaw_zeroed = false;
-	int emit_counter = 0;
-	uint32_t frame_index = 0;
+    if (imu_init() != 0) {
+        LOG_ERR("imu_init failed — thread exiting");
+        return;
+    }
 
-	printk("STATUS:ready\n");
+    ble_pose_init();
+    printk("STATUS:ready\n");
 
-	while (true) {
-		k_msleep(SAMPLE_PERIOD_MS);
+    uint32_t frame_index = 0;
 
-		float a[3], g[3];
-		if (imu_read(a, g) != 0) {
-			LOG_WRN("imu_read failed");
-			continue;
-		}
+    while (true) {
+        k_msleep(50);  /* 20 Hz */
 
-		zupt_feed(a[0], a[1], a[2], g[0], g[1], g[2], dt);
-
-		float bias[3];
-		zupt_get_bias(bias);
-
-		float g_corr[3] = { g[0] - bias[0], g[1] - bias[1], g[2] - bias[2] };
-
-		fusion_update(g_corr[0], g_corr[1], g_corr[2],
-			      a[0], a[1], a[2], dt);
-
-		if (settle < SETTLE_TICKS) {
-			settle++;
-		} else if (!yaw_zeroed && zupt_is_still()) {
-			fusion_zero_yaw();
-			yaw_zeroed = true;
-			LOG_INF("yaw auto-zeroed");
-		}
-
-		/* Feed radius estimator after settle. Gravity subtraction depends
-		 * on roll/pitch tracking gravity (not yaw), so we don't need
-		 * yaw_zeroed here. ZUPT-still windows have ω≈0 which the
-		 * estimator naturally rejects via its own gate. */
-		if (settle >= SETTLE_TICKS) {
-			float q[4];
-			fusion_get_quaternion(q);
-			radius_feed(q, a, g_corr, dt);
-		}
-
-		if (++emit_counter >= EMIT_EVERY_N) {
-            emit_counter = 0;
-
-            float roll, pitch, yaw;
-            fusion_get_euler(&roll, &pitch, &yaw);
-            printk("LOCATION:%.2f,%.2f,%.2f\n",
-                (double)roll, (double)pitch, (double)yaw);
-
-            float r = 0.0f;
-            bool  r_valid = radius_estimate(&r);
-            if (!r_valid) { r = 0.0f; }
-
-            /* Update cached BLE pose — only sent when Pi requests it */
-            ble_pose_update(roll, pitch, yaw, r, r_valid, frame_index++);
+        float a[3], g[3];
+        if (imu_read(a, g) != 0) {
+            LOG_WRN("imu_read failed");
+            continue;
         }
-	}
+
+        /* a[] is [x, y, z] in sensor frame.
+         * Define pitch_deg as the angle of the USB axis from horizontal.
+         * 0°  = USB pointing horizontally away from centre
+         * 90° = USB pointing straight down at ground
+         * Adjust axis sign/index to match your board orientation. */
+        float ax = a[0], ay = a[1], az = a[2];
+        float horiz = sqrtf(ax * ax + ay * ay);
+        float pitch_deg = atan2f(-az, horiz) * (180.0f / (float)M_PI);
+
+        ble_pose_update(pitch_deg, frame_index++);
+    }
 }

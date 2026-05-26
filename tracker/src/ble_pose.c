@@ -62,31 +62,19 @@ void ble_pose_init(void)
 }
 
 /* Called from processing_thread at 20 Hz — encodes and notifies immediately */
-void ble_pose_update(float roll, float pitch, float yaw,
-                     float radius, bool radius_valid, uint32_t frame_index)
+void ble_pose_update(float pitch_deg, uint32_t frame_index)
 {
     if (!notify_enabled) return;
 
     TrackerPose msg = TrackerPose_init_zero;
-    msg.roll         = roll;
-    msg.pitch        = pitch;
-    msg.yaw          = yaw;
-    msg.radius       = radius;
-    msg.radius_valid = radius_valid;
-    msg.frame_index  = frame_index;
+    msg.pitch       = pitch_deg;
+    msg.frame_index = frame_index;
 
-    uint8_t encode_buf[TrackerPose_size];
-    pb_ostream_t stream = pb_ostream_from_buffer(encode_buf, sizeof(encode_buf));
+    uint8_t buf[TrackerPose_size];
+    pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
     if (!pb_encode(&stream, TrackerPose_fields, &msg)) {
         LOG_ERR("pb_encode failed");
         return;
     }
-
-    /* attrs layout:
-     *   [0] primary service
-     *   [1] notify characteristic declaration
-     *   [2] notify characteristic value  ← notify from here
-     *   [3] CCC descriptor
-     */
-    bt_gatt_notify(NULL, &pose_svc.attrs[2], encode_buf, stream.bytes_written);
+    bt_gatt_notify(NULL, &pose_svc.attrs[2], buf, stream.bytes_written);
 }

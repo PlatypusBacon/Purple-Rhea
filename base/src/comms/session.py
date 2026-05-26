@@ -9,7 +9,7 @@ import paho.mqtt.client as mqtt
 import os
 
 from bleak import BleakClient, BleakScanner
-
+import math
 import config
 from storage.scan_session import ScanSession, ScanFrame, CameraPose
 from pipeline.pose_computation import compute_camera_distance
@@ -39,6 +39,13 @@ _STEPS_PER_OUTPUT_REV = _STEPS_PER_REV * _GEAR_RATIO
 _STEPS_PER_DEGREE     = _STEPS_PER_OUTPUT_REV / 360.0
 
 
+
+def _safe_float(value: float, fallback: float = 0.0, 
+                lo: float = -1e6, hi: float = 1e6) -> float:
+    """Return value if finite and in range, else fallback."""
+    if not math.isfinite(value) or value < lo or value > hi:
+        return fallback
+    return value
 def _wrap_deg180(angle_deg: float) -> float:
     return (angle_deg + 180.0) % 360.0 - 180.0
 
@@ -120,23 +127,20 @@ def _motor_off(chip: int) -> None:
 
 class BLEPoseClient:
     """
-    Manages a persistent BLE connection to the XIAO.
-    Call request_pose() to trigger a single notify → returns TrackerPose.
-    Runs its own asyncio event loop in a background thread.
+    Subscribes to 20 Hz notify stream from XIAO.
+    Call get_latest_pose() to snapshot the most recent frame.
     """
 
     def __init__(self) -> None:
         self._client: BleakClient | None = None
         self._loop = asyncio.new_event_loop()
-        self._pose_event = asyncio.Event()
         self._latest_proto: TrackerPose | None = None
+        self._lock = threading.Lock()
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout=30):
             raise RuntimeError("BLE: timed out connecting to TrackerPose")
-
-    # ── background thread ─────────────────────────────────────────────────
 
     def _run(self) -> None:
         self._loop.run_until_complete(self._connect_loop())
@@ -144,9 +148,7 @@ class BLEPoseClient:
     async def _connect_loop(self) -> None:
         while True:
             print("[BLE] scanning for 'TrackerPose'...")
-            device = await BleakScanner.find_device_by_name(
-                _BLE_DEVICE_NAME, timeout=15.0
-            )
+            device = await BleakScanner.find_device_by_name(_BLE_DEVICE_NAME, timeout=15.0)
             if device is None:
                 print("[BLE] not found — retrying in 5 s")
                 await asyncio.sleep(5)
@@ -158,7 +160,7 @@ class BLEPoseClient:
                     self._client = client
                     await client.start_notify(_BLE_POSE_CHR_UUID, self._on_notify)
                     print("[BLE] connected and subscribed")
-                    await asyncio.sleep(1.0)   # let CCC registration reach the peripheral
+                    await asyncio.sleep(0.5)  # let first notifies arrive
                     self._ready.set()
                     while client.is_connected:
                         await asyncio.sleep(0.5)
@@ -175,43 +177,19 @@ class BLEPoseClient:
         except Exception as e:
             print(f"[BLE] decode error: {e}")
             return
-        self._latest_proto = proto
-        # Signal the waiting coroutine from the BLE thread's loop
-        self._loop.call_soon_threadsafe(self._pose_event.set)
+        with self._lock:
+            self._latest_proto = proto
 
-    # ── called from main thread ───────────────────────────────────────────
-
-    def request_pose(self, timeout: float = 5.0) -> TrackerPose:
-        """Write to request characteristic → wait for the single notify."""
-        future = asyncio.run_coroutine_threadsafe(
-            self._request_async(timeout), self._loop
-        )
-        return future.result(timeout=timeout + 1.0)
-
-    async def _request_async(self, timeout: float) -> TrackerPose:
-        if self._client is None or not self._client.is_connected:
-            raise RuntimeError("BLE not connected")
-
-        max_attempts = 3
-        for attempt in range(1, max_attempts + 1):
-            self._pose_event.clear()
-            self._latest_proto = None
-
-            print(f"  [BLE] write attempt {attempt}/{max_attempts}")
-            await self._client.write_gatt_char(
-                _BLE_REQ_CHR_UUID, b"\x01", response=False  # must match WRITE_WITHOUT_RESP
-            )
-
-            try:
-                await asyncio.wait_for(self._pose_event.wait(), timeout=timeout)
-                self._pose_event.clear()
-                return self._latest_proto
-            except asyncio.TimeoutError:
-                print(f"  [BLE] attempt {attempt} timed out — "
-                    f"{'retrying' if attempt < max_attempts else 'giving up'}")
-                await asyncio.sleep(0.5)
-
-        raise TimeoutError(f"BLE pose notify timed out after {max_attempts} attempts")
+    def get_latest_pose(self, min_age_s: float = 0.0) -> TrackerPose:
+        """
+        Returns the most recently received pose.
+        Raises RuntimeError if nothing has arrived yet.
+        """
+        with self._lock:
+            proto = self._latest_proto
+        if proto is None:
+            raise RuntimeError("BLE: no pose received yet")
+        return proto
 
 
 # ── MQTT image waiter ─────────────────────────────────────────────────────────
@@ -303,10 +281,16 @@ def start_session(on_frame_captured=None) -> ScanSession:
             print("  [MQTT] trigger sent")
 
             # 2. Request pose snapshot from XIAO over BLE
-            print("  [BLE] requesting pose...")
-            pose_proto = ble.request_pose(timeout=5.0)
-            print(f"  [BLE] got pose — frame={pose_proto.frame_index} "
-                  f"yaw={pose_proto.yaw:.1f}° pitch={pose_proto.pitch:.1f}°")
+            pose_proto = ble.get_latest_pose()
+
+            # Sanity check only — should never be wild with pure accel
+            pitch_deg = pose_proto.pitch
+            if not math.isfinite(pitch_deg) or not (-90.0 <= pitch_deg <= 90.0):
+                print(f"  [WARN] bad pitch {pitch_deg} — using 0.0")
+                pitch_deg = 0.0
+
+            print(f"  [BLE] pitch={pitch_deg:.1f}°")
+            radius = compute_camera_distance(pitch_deg)
 
             # 3. Wait for JPEG from ESP32-CAM
             jpeg_bytes = waiter.wait(timeout=30.0)
