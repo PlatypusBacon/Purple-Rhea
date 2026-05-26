@@ -16,8 +16,8 @@ import config
 
 OUTPUT_ROOT = config.OUTPUT_DIR
 FRAMES_DIR = config.IMAGE_CACHE
-MESH_DIR = config.OUTPUT_DIR
-POINT_DIR = config.OUTPUT_DIR
+MESH_DIR = config.MESH_DIR
+POINT_DIR = config.POINT_DIR
 
 app = Flask(__name__, static_folder="web/static", static_url_path="/static")
 
