@@ -22,7 +22,6 @@ MQTT_BROKER  = "10.48.233.146"
 MQTT_PORT    = 1883
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
-NOMINAL_RADIUS              = 0.20
 RUN_SURFACE_RECON           = True
 SURFACE_METHOD              = "poisson"
 POISSON_DEPTH               = 9

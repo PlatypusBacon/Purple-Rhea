@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 import os
 import config
+import math
 
 # Minimum number of views that must carve a voxel for it to be removed.
 # Setting this to 1 (original behaviour) means any single bad mask can delete
@@ -25,12 +26,9 @@ MIN_CARVE_VIEWS = 1   # increase to 2 or 3 if you get Swiss-cheese artefacts
 
 
 def compute_visual_hull(images, projections, grid_resolution=80):
-    """
-    Space carving: voxel grid carved by silhouette masks from all views.
-    Returns (N, 3) array of surviving voxel centres.
-    """
     print(f"\n[hull] Building masks for {len(images)} images...")
-    masks = [_build_mask(img, idx) for idx, img in enumerate(images)]
+    masks = [_build_mask(img, P, idx) 
+             for idx, (img, P) in enumerate(zip(images, projections))]
 
     # Save masks for debugging
     os.makedirs("output/silhouettes", exist_ok=True)
@@ -133,28 +131,63 @@ def compute_visual_hull(images, projections, grid_resolution=80):
 #  Mask generation                                                             #
 # --------------------------------------------------------------------------- #
 
-def _build_mask(img: np.ndarray, frame_idx: int = 0) -> np.ndarray:
+def _project_plate_mask(img: np.ndarray, P: np.ndarray, frame_idx: int) -> np.ndarray:
     """
-    Build silhouette mask by:
-      1. Detect the turntable plate rim via Canny + Hough ellipse (or circle).
-      2. Fill the detected plate region.
-      3. Within that region, separate object from plate via brightness/colour.
-      4. Morphological cleanup + largest component.
+    Project the known physical plate circle into the image using P,
+    and fill it to create the plate ROI mask.
+    
+    Much more reliable than Canny-based detection since it uses known geometry.
     """
+    h, w = img.shape[:2]
+    
+    plate_radius = config.RIG_BASE_LENGTH  # physical radius in metres, e.g. 0.15
+    n_points = 360
+    
+    # Sample points around the plate circle at Z=0 (plate sits on turntable surface)
+    angles = np.linspace(0, 2 * np.pi, n_points)
+    circle_3d = np.array([
+        [plate_radius * np.cos(a), plate_radius * np.sin(a), 0.0, 1.0]
+        for a in angles
+    ])  # (360, 4)
+    
+    # Project into image
+    proj = (P @ circle_3d.T).T  # (360, 3)
+    depth = proj[:, 2]
+    
+    valid = depth > 0
+    if valid.sum() < 10:
+        print(f"  [plate {frame_idx:02d}] projected plate mostly behind camera — fallback")
+        return _fallback_ellipse(img)
+    
+    px = (proj[:, 0] / np.where(valid, depth, 1)).astype(int)
+    py = (proj[:, 1] / np.where(valid, depth, 1)).astype(int)
+    
+    points = np.stack([px[valid], py[valid]], axis=1)
+    
+    # Clamp to image bounds for drawing
+    points[:, 0] = np.clip(points[:, 0], 0, w - 1)
+    points[:, 1] = np.clip(points[:, 1], 0, h - 1)
+    
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(mask, [points.reshape(-1, 1, 2)], 255)
+    
+    px_count = int(mask.sum() // 255)
+    print(f"  [plate {frame_idx:02d}] projected plate mask: {px_count} px "
+          f"({100*px_count/mask.size:.1f}%)")
+    
+    return mask
+
+def _build_mask(img: np.ndarray, P: np.ndarray, frame_idx: int = 0) -> np.ndarray:
     h_img, w_img = img.shape[:2]
     gray = _to_gray(img)
 
-    # ------------------------------------------------------------------ #
-    # Stage 1: Find the turntable plate using Canny + contours            #
-    # The plate rim appears as a bright elliptical ring on the dark mat.  #
-    # ------------------------------------------------------------------ #
-    plate_mask = _detect_plate_mask(img, gray, frame_idx)
+    plate_mask = _project_plate_mask(img, P, frame_idx)
     plate_px = int(plate_mask.sum() // 255)
     print(f"  [mask {frame_idx:02d}] plate mask covers {plate_px} px "
           f"({100*plate_px/plate_mask.size:.1f}% of image)")
 
     if plate_px < 1000:
-        print(f"  [WARN mask {frame_idx:02d}] plate detection failed — "
+        print(f"  [WARN mask {frame_idx:02d}] projected plate mask too small — "
               f"falling back to centre ellipse")
         plate_mask = _fallback_ellipse(gray)
 
@@ -163,22 +196,25 @@ def _build_mask(img: np.ndarray, frame_idx: int = 0) -> np.ndarray:
     # The plate surface is dark (low value). The cube is bright/coloured. #
     # Simply threshold: dark = plate surface = background                 #
     # ------------------------------------------------------------------ #
-    
-    # Convert to LAB for better brightness separation
+
+    # Erode the plate mask to strip the bright metallic rim and push the
+    # boundary away from the white wall visible behind the plate edge.
+    erode_k = np.ones((45, 45), np.uint8)
+    plate_interior = cv2.erode(plate_mask, erode_k, iterations=1)
+
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    L   = lab[:, :, 0]   # L channel: 0=black, 255=white
-    
-    # Plate surface is dark — threshold to find bright (cube) pixels
-    # Tune the threshold (currently 80) if cube bottom gets clipped
-    _, cube_bright = cv2.threshold(L, 80, 255, cv2.THRESH_BINARY)
-    
-    # Also catch all saturated colours (cube faces)
+    L   = lab[:, :, 0]
+
+    # Bright but not TOO bright: wall behind plate is L > 190
+    cube_bright = cv2.inRange(L, 55, 190)
+
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     coloured = cv2.inRange(hsv, (0, 60, 40), (180, 255, 255))
-    
-    # Union: anything bright OR coloured inside the plate
+    # Exclude near-white saturated pixels (wall can have slight color cast)
+    coloured = cv2.bitwise_and(coloured, cv2.bitwise_not(cv2.inRange(L, 190, 255)))
+
     cube_px = cv2.bitwise_or(cube_bright, coloured)
-    cube_px = cv2.bitwise_and(cube_px, plate_mask)
+    cube_px = cv2.bitwise_and(cube_px, plate_interior)
     
     roi_px = int(cube_px.sum() // 255)
     print(f"  [mask {frame_idx:02d}] cube pixels inside plate: {roi_px}")
@@ -212,82 +248,73 @@ def _build_mask(img: np.ndarray, frame_idx: int = 0) -> np.ndarray:
 
 
 def _detect_plate_mask(img: np.ndarray, gray: np.ndarray, frame_idx: int) -> np.ndarray:
-    """
-    Detect the circular turntable plate using Canny edge detection.
-    
-    The bright specular rim of the plate gives a strong Canny response.
-    We find the largest closed contour that is roughly circular/elliptical
-    and fill it to create the plate ROI mask.
-    """
     h, w = gray.shape
 
-    # Blur to suppress cube edge noise, keep the strong plate rim
     blurred = cv2.GaussianBlur(gray, (9, 9), 2)
-
-    # Canny — lower threshold catches the rim even if partly in shadow
-    edges = cv2.Canny(blurred, threshold1=30, threshold2=100)
-
-    # Dilate edges to close small gaps in the rim
-    edges = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=2)
-
-    # Save edge debug image
+    edges = cv2.Canny(blurred, threshold1=20, threshold2=80)
+    edges = cv2.dilate(edges, np.ones((7, 7), np.uint8), iterations=2)
     cv2.imwrite(f"output/silhouettes/edges_{frame_idx:02d}.png", edges)
 
-    # Find contours and look for the plate rim
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
     if not contours:
         print(f"  [plate {frame_idx:02d}] no contours found")
         return np.zeros((h, w), dtype=np.uint8)
 
-    # Score contours: want large area, roughly elliptical (low eccentricity variance)
     best_mask = None
     best_score = 0
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < (h * w * 0.05):   # must cover at least 5% of image
+        # Lower area threshold — partial arcs still enclose significant area
+        if area < (h * w * 0.02):
             continue
-        if len(cnt) < 5:            # need 5 pts to fit ellipse
+        if len(cnt) < 5:
             continue
 
-        # Fit an ellipse to the contour
         try:
             ellipse = cv2.fitEllipse(cnt)
         except cv2.error:
             continue
 
         (ex, ey), (ea, eb), angle = ellipse
+        # ea >= eb always (OpenCV convention: ea is major axis)
         if eb < 1:
             continue
-        if ea < w * 0.4 or eb < h * 0.25:
+
+        # Accept ellipses where at least ONE axis covers ~30% of the image
+        # This handles partial plate rims that extend beyond the frame
+        if ea < w * 0.25 and eb < h * 0.20:
             continue
 
-        # Aspect ratio check — plate viewed at an angle gives ellipse,
-        # but axes shouldn't be wildly different (not a line)
-        aspect = ea / eb if eb > 0 else 0
-        if aspect < 0.2 or aspect > 5.0:
+        aspect = ea / eb if eb > 0 else 999
+        # Allow more elongated ellipses (low-angle shots compress the plate)
+        if aspect < 0.15 or aspect > 8.0:
             continue
 
-        # Prefer ellipses whose centre is in the lower-centre of the frame
-        # (plate tends to sit centre-bottom from camera angle)
-        cx_norm = abs(ex / w - 0.5)   # 0=centred, 0.5=edge
-        cy_norm = ey / h               # 0=top, 1=bottom
+        # Circularity of the contour itself (not the fitted ellipse)
+        # Real plate rim arc has high circularity; rig clutter does not
+        perimeter = cv2.arcLength(cnt, True)
+        if perimeter < 1:
+            continue
+        circularity = 4 * math.pi * area / (perimeter ** 2)
 
-        # Score: large area + centred horizontally + in lower half
-        score = area * (1 - cx_norm) * (0.3 + cy_norm)
+        # Centre should be roughly in the image (allow outside for partial plates)
+        cx_norm = abs(ex / w - 0.5)
+
+        # Heavily weight circularity to reject rig/clutter contours
+        score = area * (circularity ** 2) * (1.2 - cx_norm)
+
+        print(f"  [plate {frame_idx:02d}] candidate: "
+              f"centre=({ex:.0f},{ey:.0f}) axes=({ea:.0f},{eb:.0f}) "
+              f"circ={circularity:.3f} area={area:.0f} score={score:.0f}")
 
         if score > best_score:
             best_score = score
             best_mask = np.zeros((h, w), dtype=np.uint8)
             cv2.ellipse(best_mask, ellipse, 255, -1)
 
-        print(f"  [plate {frame_idx:02d}] candidate ellipse: "
-              f"centre=({ex:.0f},{ey:.0f}) axes=({ea:.0f},{eb:.0f}) "
-              f"area={area:.0f} score={score:.0f}")
-
     if best_mask is None:
-        print(f"  [plate {frame_idx:02d}] no valid ellipse found in contours")
+        print(f"  [plate {frame_idx:02d}] no valid ellipse found")
         return np.zeros((h, w), dtype=np.uint8)
 
     return best_mask

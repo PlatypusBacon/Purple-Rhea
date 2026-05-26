@@ -63,29 +63,46 @@ def _motor_off(chip: int) -> None:
 # ── BLE pose client ───────────────────────────────────────────────────────────
 
 class BLEPoseClient:
-    """
-    Subscribes to 20 Hz notify stream from XIAO.
-    Call get_latest_pose() to snapshot the most recent frame.
-    """
-
     def __init__(self) -> None:
         self._client: BleakClient | None = None
         self._loop = asyncio.new_event_loop()
         self._latest_proto: TrackerPose | None = None
         self._lock = threading.Lock()
         self._ready = threading.Event()
+        # FIX 2: separate event that fires on the first real notify packet,
+        # so _ready is never set prematurely before data is actually flowing.
+        self._pose_event = threading.Event()
+        self._stop_event = asyncio.Event()
+        # FIX 1: asyncio lock prevents concurrent BleakScanner calls that
+        # cause "Operation already in progress" errors on reconnect.
+        self._scan_lock: asyncio.Lock | None = None   # created inside the loop
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout=30):
+            self.stop()
             raise RuntimeError("BLE: timed out connecting to TrackerPose")
 
     def _run(self) -> None:
+        # FIX 1: create the lock inside the loop thread so it belongs to the
+        # correct event loop (asyncio locks are loop-bound).
+        self._scan_lock = asyncio.Lock()
         self._loop.run_until_complete(self._connect_loop())
 
     async def _connect_loop(self) -> None:
-        while True:
+        while not self._stop_event.is_set():
             print("[BLE] scanning for 'TrackerPose'...")
-            device = await BleakScanner.find_device_by_name(_BLE_DEVICE_NAME, timeout=15.0)
+            # FIX 1: serialise scanner calls so a reconnect attempt never
+            # overlaps with an in-progress scan.
+            async with self._scan_lock:
+                try:
+                    device = await BleakScanner.find_device_by_name(
+                        _BLE_DEVICE_NAME, timeout=15.0
+                    )
+                except Exception as e:
+                    print(f"[BLE] scan error: {e} — retrying in 5 s")
+                    await asyncio.sleep(5)
+                    continue
+
             if device is None:
                 print("[BLE] not found — retrying in 5 s")
                 await asyncio.sleep(5)
@@ -96,16 +113,18 @@ class BLEPoseClient:
                 async with BleakClient(device) as client:
                     self._client = client
                     await client.start_notify(_BLE_POSE_CHR_UUID, self._on_notify)
-                    print("[BLE] connected and subscribed")
-                    await asyncio.sleep(0.5)
-                    self._ready.set()
-                    while client.is_connected:
+                    print("[BLE] connected and subscribed — waiting for first packet")
+                    # FIX 2: _ready is now set inside _on_notify when the first
+                    # real packet arrives, not here. Remove the premature set.
+                    while client.is_connected and not self._stop_event.is_set():
                         await asyncio.sleep(0.5)
             except Exception as e:
                 print(f"[BLE] disconnected: {e} — reconnecting in 3 s")
                 self._client = None
                 self._ready.clear()
-                await asyncio.sleep(3)
+                self._pose_event.clear()
+                if not self._stop_event.is_set():
+                    await asyncio.sleep(3)
 
     def _on_notify(self, sender, data: bytearray) -> None:
         proto = TrackerPose()
@@ -116,13 +135,39 @@ class BLEPoseClient:
             return
         with self._lock:
             self._latest_proto = proto
+        # FIX 2: signal that a real packet has arrived; set _ready on the
+        # very first packet so callers know data is genuinely flowing.
+        self._pose_event.set()
+        if not self._ready.is_set():
+            print("[BLE] first packet received — marking ready")
+            self._ready.set()
 
-    def get_latest_pose(self) -> TrackerPose:
+    # FIX 3: block until a pose is available instead of raising immediately.
+    # This eliminates "no pose received yet" errors when the session starts
+    # before the XIAO has sent its first notification.
+    def get_latest_pose(self, timeout: float = 5.0) -> TrackerPose:
+        if not self._pose_event.wait(timeout=timeout):
+            raise TimeoutError(f"BLE: no pose received within {timeout}s")
         with self._lock:
-            proto = self._latest_proto
-        if proto is None:
-            raise RuntimeError("BLE: no pose received yet")
-        return proto
+            return self._latest_proto
+
+    def stop(self) -> None:
+        """Signal the async loop to exit cleanly."""
+        self._loop.call_soon_threadsafe(self._stop_event.set)
+        self._thread.join(timeout=5)
+        print("[BLE] stopped")
+
+
+# ── Module-level singleton so start_session() can't double-init ───────────────
+_ble_client: BLEPoseClient | None = None
+_ble_lock = threading.Lock()
+
+def _get_ble_client() -> BLEPoseClient:
+    global _ble_client
+    with _ble_lock:
+        if _ble_client is None or not _ble_client._thread.is_alive():
+            _ble_client = BLEPoseClient()
+        return _ble_client
 
 
 # ── MQTT image waiter ─────────────────────────────────────────────────────────
@@ -166,7 +211,7 @@ def start_session(on_frame_captured=None) -> ScanSession:
     waiter  = _ImageWaiter()
 
     print("[BLE] connecting...")
-    ble = BLEPoseClient()
+    ble = _get_ble_client()
     print("[BLE] ready")
 
     def _on_message(client, userdata, msg):
@@ -191,7 +236,14 @@ def start_session(on_frame_captured=None) -> ScanSession:
     mqttc.loop_start()
 
     chip = lgpio.gpiochip_open(0)
+    # FIX 5: defensively free each pin before claiming it. lgpio raises
+    # "Operation already in progress" if a pin was left claimed from a
+    # previous session that exited uncleanly (e.g. mid-frame exception).
     for pin in _PINS:
+        try:
+            lgpio.gpio_free(chip, pin)
+        except Exception:
+            pass
         lgpio.gpio_claim_output(chip, pin, 0)
 
     steps_per_frame_f = _STEPS_PER_DEGREE * config.STEP_DEGREES
@@ -210,11 +262,21 @@ def start_session(on_frame_captured=None) -> ScanSession:
             print("  [MQTT] trigger sent")
 
             # 2. Get latest pose from XIAO
-            pose_proto = ble.get_latest_pose()
+            # FIX 4: spin-wait up to 2 s for the frame_index to advance so
+            # we never record a stale pose from the previous capture cycle.
+            if last_frame_index is not None:
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    pose_proto = ble.get_latest_pose()
+                    if pose_proto.frame_index != last_frame_index:
+                        break
+                    time.sleep(0.05)
+                else:
+                    print(f"  [WARN] pose frame_index still {pose_proto.frame_index} "
+                          f"after 2 s — XIAO may be stale, proceeding anyway")
+            else:
+                pose_proto = ble.get_latest_pose()
 
-            if last_frame_index is not None and pose_proto.frame_index == last_frame_index:
-                print(f"  [WARN] pose frame_index did not advance "
-                      f"({pose_proto.frame_index}) — XIAO may be stale")
             last_frame_index = pose_proto.frame_index
 
             pitch_deg = pose_proto.pitch

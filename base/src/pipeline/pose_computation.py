@@ -139,15 +139,6 @@ def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[
 # --------------------------------------------------------------------------- #
 
 def _recover_projections_pnp(frames, matches, keypoints_per_frame, K):
-    """
-    Frame 0 = identity anchor.
-    Triangulate frame 0 vs each other frame directly,
-    then use solvePnPRansac to place every frame independently in the
-    same metric coordinate system. No error accumulation across frames.
-
-    FIX: triangulation now uses projections[0] as the left projection
-         (the actual anchor), not a freshly constructed identity matrix.
-    """
     import cv2
     n = len(frames)
     projections = [None] * n
@@ -156,6 +147,15 @@ def _recover_projections_pnp(frames, matches, keypoints_per_frame, K):
     projections[0] = K @ np.hstack([R0, t0])
     print(f"    frame 00: identity (anchor)")
     print(f"    anchor P:\n{projections[0]}")
+
+    # ── NEW: servo priors so triangulation has two distinct projections ──
+    servo_projections = [
+        _projection_for_pose_with_h(
+            f.pose, K,
+            f.pose.radius if f.pose.radius > 0.01 else config.NOMINAL_RADIUS
+        )
+        for f in frames
+    ]
 
     for i in range(1, n):
         key = (0, i) if (0, i) in matches else None
@@ -172,16 +172,10 @@ def _recover_projections_pnp(frames, matches, keypoints_per_frame, K):
         pts_i = np.float32([kps_i[m.trainIdx].pt for m in dmatches])
         print(f"    frame {i:02d}: {len(dmatches)} matches to frame 00")
 
-        # FIX: use projections[0] (correct world-space anchor), not identity
-        # Original code used: P_init = K @ np.hstack([np.eye(3), np.zeros((3, 1))])
-        # which is the same as projections[0] here, but was recomputed incorrectly
-        # as a standalone variable rather than guaranteed to match projections[0].
-        X4d = cv2.triangulatePoints(projections[0], projections[0], pts_0.T, pts_i.T)
-        # NOTE: the second arg above should ideally be a prior estimate for frame i,
-        # but we don't have that yet at this point, so we use projections[0] as a
-        # dummy and rely on PnP to correct it. For better initialisation you could
-        # use the servo-angle projection as the second arg.
-        X3d = (X4d[:3] / X4d[3]).T  # (M, 3)
+        # ── FIX: use servo prior for frame i as second projection ──
+        X4d = cv2.triangulatePoints(projections[0], servo_projections[i], pts_0.T, pts_i.T)
+        X3d = (X4d[:3] / X4d[3]).T
+
 
         print(f"    frame {i:02d}: triangulated {len(X3d)} 3D points, "
               f"depth range: {X3d[:, 2].min():.4f}..{X3d[:, 2].max():.4f}")
@@ -277,6 +271,7 @@ def _projection_for_pose_with_h(pose, K: np.ndarray, h: float) -> np.ndarray:
     H     = config.CAMERA_HEIGHT
     horiz = math.sqrt(max(h**2 - H**2, 0.0))
 
+    # Camera centre in world space
     C = np.array([
         horiz * math.sin(servo_rad),
         horiz * math.cos(servo_rad),
@@ -315,9 +310,3 @@ def _projection_for_pose_with_h(pose, K: np.ndarray, h: float) -> np.ndarray:
     t = -R_world_to_cam @ C
     return K @ np.hstack([R_world_to_cam, t.reshape(3, 1)])
 
-
-# Keep old signature for any external callers that use pose.radius directly
-def _projection_for_pose(pose, K: np.ndarray) -> np.ndarray:
-    """Legacy wrapper — prefers pose.radius, falls back to NOMINAL_RADIUS."""
-    h = pose.radius if pose.radius > 0.01 else config.NOMINAL_RADIUS
-    return _projection_for_pose_with_h(pose, K, h)
