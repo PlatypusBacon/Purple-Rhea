@@ -15,7 +15,7 @@ def run(session: ScanSession, on_progress=None) -> str:
     if not session.is_complete():
         missing = session.missing_indices()
         raise ValueError(f"Session incomplete — missing frames: {missing}")
-
+    
     _progress("Starting pipeline")
 
     # Step 1: Load images

@@ -14,6 +14,7 @@ const char *password = "Jg200311";
 
 // MQTT config
 const char* mqttServer = "10.133.32.146";
+const char* mqttServer = "10.133.32.146";
 const char* HostName = "ESP32-CAM";
 const char* mqttUser = "47484333";
 const char* mqttPassword = "47484333";
@@ -24,8 +25,13 @@ const int MAX_PAYLOAD = 60000;
 
 bool flash = true;
 
+<<<<<<< HEAD
 // Tracker UART
 #define TRACKER_RX_PIN  3
+=======
+// Tracker UART (GPIO 14/15 conflict with SD card on AI-Thinker)
+#define TRACKER_RX_PIN  13
+>>>>>>> refs/remotes/origin/main
 #define TRACKER_TX_PIN  -1
 #define TRACKER_BAUD    115200
 
@@ -309,13 +315,35 @@ void setup() {
   client.setCallback(callback);
 }
 
+static uint32_t uart_debug_timer = 0;
+static uint32_t uart_bytes_seen = 0;
+
 void loop() {
     if (!client.connected()) reconnect();
+<<<<<<< HEAD
     try_read_pose();   // drain UART each loop
     Serial.printf("GOT POSE: yaw=%.1f pitch=%.1f roll=%.1f\n",
         (double)latest_pose.yaw,
         (double)latest_pose.pitch,
         (double)latest_pose.roll);
+=======
+    bool got_pose = try_read_pose();   // drain UART each loop
+    if (!got_pose && pose_rx_last_ok_ms > 0 && (millis() - pose_rx_last_ok_ms) > 3000) {
+        Serial.println("[POSE RX] no valid tracker pose for >3s");
+        pose_rx_last_ok_ms = millis();
+    }
+
+    int avail = TrackerSerial.available();
+    if (avail > 0) uart_bytes_seen += avail;
+
+    if (millis() - uart_debug_timer > 2000) {
+        Serial.printf("[UART debug] bytes_seen=%u  available=%d\n",
+                      uart_bytes_seen, TrackerSerial.available());
+        uart_debug_timer = millis();
+    }
+
+    try_read_pose();
+>>>>>>> refs/remotes/origin/main
     client.loop();
     delay(10);
 }
