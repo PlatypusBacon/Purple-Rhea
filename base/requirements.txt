@@ -3,3 +3,4 @@ opencv-python
 pyserial
 paho-mqtt
 flask
+open3d
