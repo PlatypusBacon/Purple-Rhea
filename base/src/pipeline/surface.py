@@ -4,15 +4,18 @@ Surface Reconstruction — converts the filtered point cloud into a watertight,
 
 Strategy
 --------
-1. Pre-process the point cloud (outlier removal, resampling for uniform density)
-2. Estimate & orient normals robustly using multiple camera viewpoints
-3. Run Poisson surface reconstruction at a generous depth
-4. Aggressively remove low-density boundary artefacts
-5. Post-process: fill holes, remove non-manifold geometry, smooth lightly
-6. Validate watertightness; warn if the mesh is not print-ready
+1. Reconstruct the occupancy voxel grid from surviving point positions
+2. Run marching cubes to extract an isosurface
+3. Convert to Blender coordinate system
+4. Write .obj file
+5. Printability check via open3d
 
-Requires: open3d >= 0.17
-    pip install open3d
+FIX: voxel grid constants now read from config to stay consistent with
+     visual_hull.py (original hardcoded r=0.07, z_hi=0.12 which contradicted
+     config.VOXEL_XY_EXTENT=0.12, VOXEL_Z_MAX=0.22).
+
+Requires: open3d >= 0.17, scikit-image
+    pip install open3d scikit-image
 """
 
 from __future__ import annotations
@@ -34,20 +37,25 @@ def reconstruct_surface(
     import config
     from skimage.measure import marching_cubes
 
-    print(f"    input: {len(points_3d)} points")
+    print(f"\n[surface] Input: {len(points_3d)} points")
 
     if len(points_3d) < 100:
-        print("    WARNING: fewer than 100 points")
-        return obj_path
+        print(f"    WARNING: only {len(points_3d)} points — mesh will be poor. "
+              f"Check visual hull output.")
+        if len(points_3d) == 0:
+            print("    ERROR: zero points — cannot reconstruct surface. Aborting.")
+            return obj_path
 
     # ------------------------------------------------------------------ #
-    # 1. Reconstruct the voxel grid from the surviving point positions    #
+    # 1. Reconstruct occupancy grid — must match visual_hull.py exactly   #
+    # FIX: use config values, not hardcoded constants                     #
     # ------------------------------------------------------------------ #
-    # Infer grid bounds and resolution from config (must match visual_hull)
-    r    =  0.07
-    z_lo = -0.02
-    z_hi =  0.12
-    res  = 80  # must match grid_resolution in compute_visual_hull
+    r    = config.VOXEL_XY_EXTENT   # was hardcoded 0.07
+    z_lo = config.VOXEL_Z_MIN       # was hardcoded -0.02
+    z_hi = config.VOXEL_Z_MAX       # was hardcoded 0.12
+    res  = 80   # must match grid_resolution in compute_visual_hull
+
+    print(f"[surface] Grid: XY=±{r:.3f}m  Z=[{z_lo:.3f},{z_hi:.3f}]m  res={res}")
 
     coords_xy = np.linspace(-r,   r,   res)
     coords_z  = np.linspace(z_lo, z_hi, res)
@@ -55,8 +63,6 @@ def reconstruct_surface(
     # Build occupancy grid
     grid = np.zeros((res, res, res), dtype=np.uint8)
 
-    # Map each surviving point back to its voxel index
-    # points_3d are voxel centres, so we can reverse-engineer indices
     step_xy = coords_xy[1] - coords_xy[0]
     step_z  = coords_z[1]  - coords_z[0]
 
@@ -64,28 +70,41 @@ def reconstruct_surface(
     iy = np.round((points_3d[:, 1] - coords_xy[0]) / step_xy).astype(int)
     iz = np.round((points_3d[:, 2] - coords_z[0])  / step_z).astype(int)
 
-    # Clip to valid range
     valid = (ix >= 0) & (ix < res) & (iy >= 0) & (iy < res) & (iz >= 0) & (iz < res)
+    n_mapped = int(valid.sum())
+    n_outside = int((~valid).sum())
     grid[ix[valid], iy[valid], iz[valid]] = 1
+
+    print(f"[surface] Points mapped to grid: {n_mapped} / {len(points_3d)}")
+    if n_outside > 0:
+        print(f"[surface] WARNING: {n_outside} points fell outside grid bounds! "
+              f"Check VOXEL_XY_EXTENT / VOXEL_Z_MIN / VOXEL_Z_MAX.")
+    print(f"[surface] Occupied voxels: {grid.sum()} / {res**3}")
+
+    if grid.sum() == 0:
+        print("[surface] ERROR: occupancy grid is all zeros — nothing to mesh.")
+        return obj_path
 
     # ------------------------------------------------------------------ #
     # 2. Marching cubes on the occupancy grid                             #
+    # Pad with 1 empty voxel on every face — forces closed surface        #
     # ------------------------------------------------------------------ #
-    # Pad with 1 empty voxel on every face — forces closed surface at boundaries
     grid_padded = np.pad(grid, pad_width=1, mode='constant', constant_values=0)
-
     verts_idx, faces, normals, _ = marching_cubes(grid_padded, level=0.5)
 
-    # Offset indices back by 1 to account for padding, then convert to world coords
-    verts_idx = verts_idx - 1  # undo the padding offset
+    # Undo the padding offset, then convert voxel indices → world coords
+    verts_idx = verts_idx - 1
 
     verts = np.zeros_like(verts_idx, dtype=np.float64)
     verts[:, 0] = coords_xy[0] + verts_idx[:, 0] * step_xy
     verts[:, 1] = coords_xy[0] + verts_idx[:, 1] * step_xy
     verts[:, 2] = coords_z[0]  + verts_idx[:, 2] * step_z
 
+    print(f"[surface] Marching cubes: {len(verts)} verts, {len(faces)} faces")
+
     # ------------------------------------------------------------------ #
     # 3. Convert to Blender coordinate system (matches export.py)         #
+    #    Blender Y = -world Z,  Blender Z = -world Y                      #
     # ------------------------------------------------------------------ #
     blender_verts = verts.copy()
     blender_verts[:, 1] = -verts[:, 2]
@@ -104,10 +123,9 @@ def reconstruct_surface(
             f.write(f"v {x:.6f} {y:.6f} {z:.6f}\n")
         f.write("\n")
         for face in faces:
-            # .obj faces are 1-indexed
             f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
 
-    print(f"    wrote {mesh_path}")
+    print(f"[surface] Wrote {mesh_path}")
 
     # ------------------------------------------------------------------ #
     # 5. Printability check via open3d                                    #
@@ -122,7 +140,7 @@ def reconstruct_surface(
 
 
 # --------------------------------------------------------------------------- #
-#  Camera centres                                                              #
+#  Camera centres (utility for Poisson normal orientation)                    #
 # --------------------------------------------------------------------------- #
 
 def _extract_camera_centres(
@@ -131,42 +149,38 @@ def _extract_camera_centres(
 ) -> list:
     """
     Extract optical centres from 3×4 projection matrices via SVD null space.
-    P = K[R|t]  =>  camera centre C = null(P)  (last row of V^T, dehomogenised).
     Falls back to a synthetic point above the cloud if projections unavailable.
     """
     if projections is not None and len(projections) > 0:
         centres = []
-        for P in projections:
+        for i, P in enumerate(projections):
             _, _, Vt = np.linalg.svd(P)
             C = Vt[-1]
+            if abs(C[3]) < 1e-10:
+                print(f"  [surface] WARNING: frame {i} projection null space degenerate")
+                continue
             C = C[:3] / C[3]
             centres.append(C.tolist())
+            print(f"  [surface] frame {i:02d} camera centre: {C.round(3)}")
         return centres
 
     centroid = points_3d.mean(axis=0)
     span     = points_3d.max(axis=0) - points_3d.min(axis=0)
     fallback = centroid + np.array([0.0, 0.0, span[2] * 3.0])
     print("    WARNING: no projections supplied — using synthetic camera centre")
-    print("             Pass projections= to reconstruct_surface for better normals")
     return [fallback.tolist()]
 
 
 def _orient_normals_multi_view(pcd, camera_centres: list) -> None:
-    """
-    Orient each point's normal toward its nearest camera centre.
-    Correct for a turntable rig where different surfaces face different cameras.
-    """
+    """Orient each point's normal toward its nearest camera centre."""
     import open3d as o3d
-
     points  = np.asarray(pcd.points)
     normals = np.asarray(pcd.normals)
     cams    = np.array(camera_centres)
-
-    diff    = points[:, None, :] - cams[None, :, :]   # (N, K, 3)
-    nearest = (diff ** 2).sum(axis=2).argmin(axis=1)  # (N,)
+    diff    = points[:, None, :] - cams[None, :, :]
+    nearest = (diff ** 2).sum(axis=2).argmin(axis=1)
     to_cam  = cams[nearest] - points
-
-    dot = (normals * to_cam).sum(axis=1)
+    dot     = (normals * to_cam).sum(axis=1)
     normals[dot < 0] *= -1
     pcd.normals = o3d.utility.Vector3dVector(normals)
 
@@ -177,7 +191,6 @@ def _orient_normals_multi_view(pcd, camera_centres: list) -> None:
 
 def _repair_mesh(mesh):
     import open3d as o3d
-
     mesh.remove_degenerate_triangles()
     mesh.remove_duplicated_triangles()
     mesh.remove_duplicated_vertices()
@@ -233,7 +246,7 @@ def _check_printability(mesh) -> None:
     print(f"    Watertight : {'✓' if watertight else '✗  ← NOT print-ready'}")
     print(f"    Manifold   : {'✓' if manifold   else '✗  ← NOT print-ready'}")
     if not watertight or not manifold:
-        print("    TIP: pip install pymeshfix  or open .ply in MeshLab")
+        print("    TIP: pip install pymeshfix  or open .obj in MeshLab → Filters → Repair")
     else:
         print("    Mesh is ready for 3D printing ✓")
     print(f"    ─────────────────────────────────────────────\n")
