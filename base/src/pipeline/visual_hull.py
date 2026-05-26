@@ -64,12 +64,15 @@ def compute_visual_hull(images, projections, grid_resolution=80):
 
     for frame_idx, (P, mask) in enumerate(zip(projections, masks)):
         h_img, w_img = mask.shape
-        proj  = (P @ X_h.T).T          # (N_voxels, 3)
+        proj  = (P @ X_h.T).T
         depth = proj[:, 2]
 
-        # Only project voxels in front of camera
-        valid = depth > 0
+        # Reject voxels too close to the camera
+        MIN_DEPTH = 0.10
+
+        valid = depth > MIN_DEPTH
         safe  = np.where(valid, depth, 1.0)
+
         px = (proj[:, 0] / safe).astype(int)
         py = (proj[:, 1] / safe).astype(int)
 
@@ -89,13 +92,18 @@ def compute_visual_hull(images, projections, grid_resolution=80):
         n_carve_votes = int(wants_to_carve.sum())
         n_surviving   = int((carve_votes < MIN_CARVE_VIEWS).sum()) if frame_idx == 0 \
                         else int((carve_votes < MIN_CARVE_VIEWS + frame_idx).sum())
-
+        if np.any(valid):
+            px_min, px_max = px[valid].min(), px[valid].max()
+            py_min, py_max = py[valid].min(), py[valid].max()
+            depth_min, depth_max = depth[valid].min(), depth[valid].max()
+        else:
+            px_min = px_max = py_min = py_max = depth_min = depth_max = -1
         print(f"  frame {frame_idx:02d}: "
               f"in_bounds={n_in_bounds}  in_mask={n_in_mask}  "
               f"carve_votes_added={n_carve_votes}  "
-              f"px_range=[{px.min()}..{px.max()}]  "
-              f"py_range=[{py.min()}..{py.max()}]  "
-              f"depth_range=[{depth.min():.4f}..{depth.max():.4f}]")
+              f"px_range=[{px_min}..{px_max}]"
+              f"py_range=[{py_min}..{py_max}]"
+              f"depth_range=[{depth_min:.4f}..{depth_max:.4f}]")
 
         if n_in_bounds == 0:
             print(f"  [WARN] frame {frame_idx:02d}: ZERO voxels project inside image! "

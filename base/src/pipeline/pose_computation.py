@@ -21,22 +21,7 @@ import config
 # --------------------------------------------------------------------------- #
 #  Rig geometry                                                                #
 # --------------------------------------------------------------------------- #
-def Rz(yaw):
-    c, s = math.cos(yaw), math.sin(yaw)
-    return np.array([
-        [ c, -s, 0],
-        [ s,  c, 0],
-        [ 0,  0, 1]
-    ], dtype=np.float64)
 
-
-def Rx(pitch):
-    c, s = math.cos(pitch), math.sin(pitch)
-    return np.array([
-        [1, 0,  0],
-        [0, c, -s],
-        [0, s,  c]
-    ], dtype=np.float64)
 def compute_camera_distance(pitch_deg: float) -> float | None:
     """
     Compute 3D slant distance h from camera to turntable centre.
@@ -283,56 +268,48 @@ DIST_COEFFS = np.zeros(5, dtype=np.float64)
 # --------------------------------------------------------------------------- #
 
 def _projection_for_pose_with_h(pose, K: np.ndarray, h: float) -> np.ndarray:
-    servo = math.radians(pose.servo_angle_deg)
-    pitch = math.radians(pose.imu_pitch_deg)
-    H = config.CAMERA_HEIGHT
+    """
+    Build projection matrix P = K [R | t] for one frame.
 
-    # -----------------------------
-    # 1. Base orbit (servo yaw)
-    # -----------------------------
-    R_yaw = Rz(servo)
+    Coordinate system (consistent across all files):
+      - Origin: centre of turntable plate
+      - Z axis: up
+      - At servo_angle=0 the camera sits on the +Y axis
 
-    # -----------------------------
-    # 2. Arm translation in base frame
-    # -----------------------------
-    horiz = math.sqrt(max(h**2 - H**2, 0.0))
-    t_arm = np.array([0, horiz, H], dtype=np.float64)
+    theta = IMU pitch = angle below horizontal (positive = looking down).
+    h     = slant distance from camera to the world origin.
 
-    # rotate arm into world
-    C = R_yaw @ t_arm
+    Camera position:  C = h · [cos θ · sin a,  cos θ · cos a,  sin θ]
+    Optical axis:     radial inward at angle θ below horizontal.
+    """
+    a = math.radians(pose.servo_angle_deg)
 
-    # -----------------------------
-    # 3. Camera orientation (pitch on top of yaw frame)
-    # -----------------------------
-    R_pitch = Rx(pitch)
-    R_world_to_cam = R_pitch @ R_yaw
+    if abs(pose.imu_pitch_deg) > 1.0:
+        theta = math.radians(pose.imu_pitch_deg)
+    else:
+        H = config.CAMERA_HEIGHT
+        horiz = math.sqrt(max(h**2 - H**2, 0.0))
+        theta = math.atan2(H, horiz)
 
-    # enforce proper rotation matrix (important for drift control)
-    U, _, Vt = np.linalg.svd(R_world_to_cam)
-    R_world_to_cam = U @ Vt
+    cos_a, sin_a = math.cos(a), math.sin(a)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
 
-    # -----------------------------
-    # 4. Translation from chain
-    # -----------------------------
-    t = -R_world_to_cam @ C
+    C = h * np.array([cos_t * sin_a, cos_t * cos_a, sin_t], dtype=np.float64)
 
-    # -----------------------------
-    # Debug sanity checks
-    # -----------------------------
-    det = np.linalg.det(R_world_to_cam)
-    forward = R_world_to_cam @ np.array([0, 0, 1], dtype=np.float64)
+    # OpenCV camera axes in world coordinates (X=right, Y=down, Z=forward).
+    # Derived by placing the camera on +Y at a=0 then rotating about Z.
+    right   = np.array([-cos_a,          sin_a,          0.0   ], dtype=np.float64)
+    down    = np.array([ sin_a * sin_t,  cos_a * sin_t, -cos_t ], dtype=np.float64)
+    forward = np.array([-sin_a * cos_t, -cos_a * cos_t, -sin_t ], dtype=np.float64)
 
-    to_origin = -C
-    align = float(
-        np.dot(forward, to_origin) /
-        (np.linalg.norm(forward) * np.linalg.norm(to_origin) + 1e-9)
-    )
+    R = np.stack([right, down, forward], axis=0)
+    t = -R @ C
 
-    print(
-        f"    [chain] yaw={pose.servo_angle_deg:.1f}° "
-        f"pitch={pose.imu_pitch_deg:.1f}° "
-        f"det={det:.4f} align={align:.4f}"
-    )
+    horiz = h * cos_t
+    print(f"    [proj] servo={pose.servo_angle_deg:.0f}°  "
+          f"theta={math.degrees(theta):.1f}°  "
+          f"h={h:.4f}m  horiz={horiz:.4f}m  "
+          f"C={C.round(3)}  t={t.round(3)}")
 
     return K @ np.hstack([R, t.reshape(3, 1)])
 
