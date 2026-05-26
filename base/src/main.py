@@ -4,13 +4,16 @@ Swap serial_receiver for mqtt_receiver when MQTT is ready.
 """
 
 from comms.session import start_session
+from comms.disk_session import start_disk_session
 from pipeline import runner
 import config
 
 
 def main(on_frame_captured=None, on_pipeline_progress=None):
     print("Base Node running")
-    session = start_session(on_frame_captured=on_frame_captured)
+    #session = start_session(on_frame_captured=on_frame_captured)
+    session = start_disk_session()
+
 
     if not session.is_complete():
         print(f"\nWARNING: Only {len(session)}/{config.TOTAL_FRAMES} frames received.")
