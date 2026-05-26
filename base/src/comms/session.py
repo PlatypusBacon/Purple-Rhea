@@ -245,10 +245,12 @@ def start_session(on_frame_captured=None) -> ScanSession:
         if len(data) < 4:
             print("  [MQTT] payload too short — discarding")
             return
-        # ESP32-CAM no longer bundles pose — payload is raw JPEG
-        # (pose_len prefix will be 0 if you've updated the ESP32-CAM,
-        #  or we just treat the whole payload as JPEG)
-        waiter.set(data)
+        pose_len = data[0] | (data[1] << 8)
+        jpeg_start = 2 + pose_len
+        if jpeg_start >= len(data):
+            print("  [MQTT] no JPEG after pose prefix — discarding")
+            return
+        waiter.set(data[jpeg_start:])
 
     mqttc = mqtt.Client(client_id="rpi-scanner", protocol=mqtt.MQTTv311)
     mqttc.on_message = _on_message
