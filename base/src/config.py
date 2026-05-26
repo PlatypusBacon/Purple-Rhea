@@ -1,13 +1,13 @@
 # ── Scan geometry ──────────────────────────────────────────────────────────────
 TOTAL_FRAMES   = 36
 STEP_DEGREES   = 10.0
-NOMINAL_RADIUS = 0.20        # metres — fallback only, used if h computation fails
+NOMINAL_RADIUS = 0.25        # metres — horizontal orbit radius
 
 # ── Rig physical constants (for compute_camera_distance formula) ───────────────
 RIG_BASE_LENGTH   = 0.13    # r — horizontal base length (metres)
 RIG_MIDDLE_LENGTH = 0.25    # x — middle segment length (metres)
 RIG_FINAL_LENGTH  = 0.09    # y — final segment length (metres)
-CAMERA_HEIGHT     = 0.12    # H — vertical height of camera above ground (metres)
+CAMERA_HEIGHT     = 0.23    # H — vertical height of camera above turntable (metres)
 
 # ── Voxel grid bounds (used in visual_hull.py AND surface.py) ─────────────────
 VOXEL_XY_EXTENT = 0.12      # ±metres in XY — set to slightly more than object radius
@@ -21,7 +21,7 @@ MQTT_BROKER  = "10.133.32.146"
 MQTT_PORT    = 1883
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
-NOMINAL_RADIUS              = 0.20
+NOMINAL_RADIUS              = 0.25
 RUN_SURFACE_RECON           = True
 SURFACE_METHODS             = ["convex_hull"]#, "alpha", "poisson"]
 # Backward-compatible single-method fallback if SURFACE_METHODS is empty.
@@ -30,13 +30,13 @@ SURFACE_METHOD              = "convex_hull"
 # Convex hull options
 CONVEX_HULL_JOGGLE_INPUTS   = True
 # Optional triangle budget after reconstruction (None disables decimation).
-SURFACE_TARGET_TRIANGLES    = 1200
+SURFACE_TARGET_TRIANGLES    = None
 POISSON_DEPTH               = 9
 POISSON_SCALE               = 1.1
 POISSON_LINEAR_FIT          = False
 POISSON_DENSITY_KEEP_PERCENTILE = 15
-OUTLIER_NB_NEIGHBORS        = 20
-OUTLIER_STD_RATIO           = 2.0
+OUTLIER_NB_NEIGHBORS        = 10
+OUTLIER_STD_RATIO           = 3.5
 VOXEL_SIZE                  = None
 SMOOTH_ITERATIONS           = 0
 import os as _os

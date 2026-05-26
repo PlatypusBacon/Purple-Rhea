@@ -184,15 +184,15 @@ def _prepare_point_cloud(pts: np.ndarray, o3d):
     nn = nn[np.isfinite(nn) & (nn > 0)]
     median_nn = float(np.median(nn)) if nn.size > 0 else float(voxel_size)
 
-    radius = max(median_nn * 2.5, voxel_size * 2.0)
-    min_points = max(10, min(40, int(round(len(pcd.points) * 0.01))))
+    radius = max(median_nn * 4.0, voxel_size * 3.0)
+    min_points = max(5, min(20, int(round(len(pcd.points) * 0.005))))
     if len(pcd.points) > min_points * 2:
         pcd, _ = pcd.remove_radius_outlier(
             nb_points=min_points,
             radius=float(radius),
         )
 
-    pcd = _keep_largest_point_cluster(pcd, eps=max(median_nn * 3.0, voxel_size * 2.5))
+    pcd = _keep_largest_point_cluster(pcd, eps=max(median_nn * 5.0, voxel_size * 4.0))
 
     prep = {
         "voxel_size": float(voxel_size),

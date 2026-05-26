@@ -7,7 +7,7 @@ def start_disk_session() -> ScanSession:
     session = ScanSession()
     for i in range(config.TOTAL_FRAMES):
         angle_deg = i * config.STEP_DEGREES
-        path = f"../../images/cube/capture{(i+3):02d}.jpg"
+        path = f"/Users/benyin/Desktop/frames/frame_{i:02d}_{int(angle_deg):03d}deg.jpg"
 
         buf = np.frombuffer(open(path, "rb").read(), dtype=np.uint8)
         img = cv2.imdecode(buf, cv2.IMREAD_COLOR)

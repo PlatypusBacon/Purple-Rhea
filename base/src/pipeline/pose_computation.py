@@ -73,34 +73,16 @@ def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[
         return _recover_projections_pnp(frames, matches, keypoints_per_frame, K)
 
     print("[pose] Using servo/IMU synthesis mode")
+    horiz = config.NOMINAL_RADIUS
+    H     = config.CAMERA_HEIGHT
+    theta = math.atan2(H, horiz)
+    print(f"[pose] Fixed orbit: horiz={horiz:.4f}m  H={H:.4f}m  "
+          f"theta={math.degrees(theta):.1f}°")
+
     projections = []
     for frame in frames:
         pose = frame.pose
         servo_rad = math.radians(pose.servo_angle_deg)
-
-        # ------------------------------------------------------------------ #
-        # FIX: actually use compute_camera_distance with the IMU pitch,       #
-        #      and fall back to NOMINAL_RADIUS when it fails or radius=0.     #
-        # ------------------------------------------------------------------ #
-        tracker_radius = pose.radius
-        theta = math.radians(pose.imu_pitch_deg)
-        if tracker_radius > 0.01:
-            # Tracker provided a plausible radius
-            h = tracker_radius
-            print(f"  frame {frame.index:02d}: using tracker radius h={h:.4f}m")
-        else:
-            # Tracker radius zero/invalid — compute from rig geometry + pitch
-
-            h = compute_camera_distance(theta)
-            if h is None:
-                h = config.NOMINAL_RADIUS
-                print(f"  frame {frame.index:02d}: rig formula failed, "
-                      f"using NOMINAL_RADIUS={h:.4f}m")
-            else:
-                print(f"  frame {frame.index:02d}: computed h={h:.4f}m from pitch={math.degrees(theta):.1f}°")
-
-        H     = config.CAMERA_HEIGHT
-        horiz = math.sqrt(max(h**2 - H**2, 0.0))
 
         Cx = horiz * math.sin(servo_rad)
         Cy = horiz * math.cos(servo_rad)
@@ -108,18 +90,9 @@ def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[
 
         print(f"  frame {frame.index:02d}: "
               f"servo={pose.servo_angle_deg:.1f}°  "
-              f"imu_yaw={pose.imu_yaw_deg:.1f}°  "
-              f"imu_pitch={math.degrees(theta):.1f}°  "
-              f"h={h:.4f}m  horiz={horiz:.4f}m  "
               f"C=[{Cx:.4f}, {Cy:.4f}, {Cz:.4f}]")
 
-        # Sanity check: camera should not be at the origin
-        C = np.array([Cx, Cy, Cz])
-        if np.linalg.norm(C) < 0.01:
-            print(f"  [WARN] frame {frame.index:02d}: camera centre is near origin! "
-                  f"Check radius/height values. h={h:.4f}, H={H:.4f}, horiz={horiz:.4f}")
-
-        P = _projection_for_pose_with_h(pose, K, h, theta)
+        P = _build_projection(pose.servo_angle_deg, K, horiz, H, theta)
         projections.append(P)
 
         # Decompose and print look direction for debugging
@@ -149,12 +122,11 @@ def _recover_projections_pnp(frames, matches, keypoints_per_frame, K):
     print(f"    frame 00: identity (anchor)")
     print(f"    anchor P:\n{projections[0]}")
 
-    # ── NEW: servo priors so triangulation has two distinct projections ──
+    horiz = config.NOMINAL_RADIUS
+    H     = config.CAMERA_HEIGHT
+    theta = math.atan2(H, horiz)
     servo_projections = [
-        _projection_for_pose_with_h(
-            f.pose, K,
-            f.pose.radius if f.pose.radius > 0.01 else config.NOMINAL_RADIUS
-        )
+        _build_projection(f.pose.servo_angle_deg, K, horiz, H, theta)
         for f in frames
     ]
 
@@ -267,44 +239,26 @@ DIST_COEFFS = np.zeros(5, dtype=np.float64)
 #  Per-frame projection (internal — takes explicit h)                         #
 # --------------------------------------------------------------------------- #
 
-def _projection_for_pose_with_h(pose, K: np.ndarray, h: float, theta: float) -> np.ndarray:
+def _build_projection(servo_deg: float, K: np.ndarray,
+                      horiz: float, H: float, theta: float) -> np.ndarray:
     """
-    Build projection matrix P = K [R | t] for one frame.
+    Build P = K [R | t] for one frame.
 
-    Coordinate system:
-      - Origin: centre of turntable plate
-      - Z axis: up
-      - At servo_angle=0 the camera sits on the +Y axis
-
-    h     = slant distance from camera to world origin calculated from the following
-    H     = CAMERA_HEIGHT (physical rig constant unfortunately necessary).
-    theta = ilt angle below horizontal, from the yaw of the xiao
-
-    Camera position: C = [horiz·sin a, horiz·cos a, H]
-    Optical axis:    radial inward at angle theta below horizontal.
+    Camera sits at [horiz·sin a, horiz·cos a, H] and looks toward the origin
+    tilted theta below horizontal.
     """
-    a = math.radians(pose.servo_angle_deg)
-    H     = config.CAMERA_HEIGHT
-    horiz = math.sqrt(max(h**2 - H**2, 0.0))
-
+    a = math.radians(servo_deg)
     C = np.array([horiz * math.sin(a), horiz * math.cos(a), H], dtype=np.float64)
 
     cos_a, sin_a = math.cos(a), math.sin(a)
     cos_t, sin_t = math.cos(theta), math.sin(theta)
 
-    # OpenCV camera axes in world coordinates (X=right, Y=down, Z=forward).
-    # Derived by placing the camera on +Y at a=0 then rotating about Z.
     right   = np.array([-cos_a,          sin_a,          0.0   ], dtype=np.float64)
     down    = np.array([ sin_a * sin_t,  cos_a * sin_t, -cos_t ], dtype=np.float64)
     forward = np.array([-sin_a * cos_t, -cos_a * cos_t, -sin_t ], dtype=np.float64)
 
     R = np.stack([right, down, forward], axis=0)
     t = -R @ C
-
-    print(f"    [proj] servo={pose.servo_angle_deg:.0f}°  "
-          f"theta={math.degrees(theta):.1f}°  "
-          f"h={h:.4f}m  horiz={horiz:.4f}m  "
-          f"C={C.round(3)}  t={t.round(3)}")
 
     return K @ np.hstack([R, t.reshape(3, 1)])
 
