@@ -24,29 +24,6 @@ const int MAX_PAYLOAD = 60000;
 
 bool flash = true;
 
-// Tracker UART — RX on GPIO 3 (U0RXD), Serial monitor disabled
-#define TRACKER_RX_PIN  13
-#define TRACKER_TX_PIN  -1
-#define TRACKER_BAUD    115200
-
-HardwareSerial TrackerSerial(1);        // UART1
-static TrackerPose latest_pose = TrackerPose_init_zero;
-
-enum PoseRxState : uint8_t {
-    RX_WAIT_SOF = 0,
-    RX_WAIT_LEN_HI,
-    RX_WAIT_LEN_LO,
-    RX_WAIT_PAYLOAD,
-    RX_WAIT_EOF,
-};
-
-static PoseRxState pose_rx_state = RX_WAIT_SOF;
-static uint8_t  pose_rx_buf[TrackerPose_size];
-static uint16_t pose_rx_len = 0;
-static uint16_t pose_rx_idx = 0;
-static uint32_t pose_rx_last_byte_ms = 0;
-static const uint32_t POSE_RX_TIMEOUT_MS = 50;
-
 WiFiClient espClient;
 PubSubClient client(espClient);
 
@@ -172,17 +149,22 @@ void callback(String topic, byte* message, unsigned int length) {
 
 void reconnect() {
   while (!client.connected()) {
+    Serial.print("MQTT connecting...");
     if (client.connect(HostName, mqttUser, mqttPassword)) {
+      Serial.println("connected");
       client.subscribe(topic_PHOTO);
       client.subscribe(topic_FLASH);
     } else {
+      Serial.printf("failed rc=%d\n", client.state());
       delay(5000);
     }
   }
 }
 
 void setup() {
-  TrackerSerial.begin(TRACKER_BAUD, SERIAL_8N1, TRACKER_RX_PIN, TRACKER_TX_PIN);
+  // TX-only Serial on GPIO 1 for debug — RX pin disabled (-1) so GPIO 3 stays free
+  Serial.begin(115200, SERIAL_8N1, -1, 1);
+  Serial.println();
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -224,8 +206,10 @@ void setup() {
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
+    Serial.printf("Camera init failed 0x%x\n", err);
     return;
   }
+  Serial.println("Camera init OK");
 
   sensor_t* s = esp_camera_sensor_get();
   if (s->id.PID == OV3660_PID) {
@@ -255,11 +239,15 @@ void setup() {
   WiFi.begin(ssid, password);
   WiFi.setSleep(false);
 
+  Serial.print("WiFi connecting");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
+    Serial.print(".");
   }
+  Serial.println(" connected");
 
   startCameraServer();
+  Serial.printf("Camera Ready! http://%s\n", WiFi.localIP().toString().c_str());
 
   client.setServer(mqttServer, 1883);
   client.setBufferSize(MAX_PAYLOAD);
@@ -268,7 +256,7 @@ void setup() {
 
 void loop() {
     if (!client.connected()) reconnect();
-    try_read_pose();
+    try_read_pose();   // drain UART each loop
     client.loop();
     delay(10);
 }
