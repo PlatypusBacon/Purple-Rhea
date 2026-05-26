@@ -120,11 +120,12 @@
 
   /* Controls */
   .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .btn-row button { flex: 1; }
 
   button {
     font-family: inherit;
-    font-size: 13px;
-    padding: 10px 20px;
+    font-size: 14px;
+    padding: 14px 20px;
     border: 1px solid var(--border);
     border-radius: 6px;
     background: var(--surface);
@@ -282,8 +283,10 @@
     <h2>Controls</h2>
     <div class="btn-row">
       <button class="primary" id="btn-scan" onclick="startScan()">Start Scan</button>
+      <button id="btn-reset" onclick="resetScan()" style="display:none; border-color:var(--error); color:var(--error);">Reset</button>
       <button onclick="loadFrames()">Refresh Frames</button>
     </div>
+    <div id="error-msg" style="display:none; margin-top:12px; padding:10px; background:#f8717120; border:1px solid var(--error); border-radius:6px; color:var(--error); font-size:13px;"></div>
   </div>
 
   <!-- Log -->
@@ -375,6 +378,16 @@ function updateStatus(d) {
 
   const busy = d.state === 'scanning' || d.state === 'processing';
   document.getElementById('btn-scan').disabled = busy;
+  document.getElementById('btn-reset').style.display =
+    (d.state === 'error' || d.state === 'done') ? '' : 'none';
+
+  const errorEl = document.getElementById('error-msg');
+  if (d.state === 'error' && d.error) {
+    errorEl.style.display = '';
+    errorEl.textContent = d.error;
+  } else {
+    errorEl.style.display = 'none';
+  }
 
   if (d.type && d.type !== 'keepalive') {
     addLog(d.type + (d.error ? ': ' + d.error : ''));
@@ -400,6 +413,16 @@ function startScan() {
     method: 'POST',
   }).then(r => r.json()).then(d => {
     if (d.error) addLog('Error: ' + d.error);
+  });
+}
+
+function resetScan() {
+  addLog('Resetting...');
+  fetch('/api/scan/reset', {
+    method: 'POST',
+  }).then(r => r.json()).then(d => {
+    if (d.error) addLog('Error: ' + d.error);
+    else addLog('Reset to idle');
   });
 }
 
