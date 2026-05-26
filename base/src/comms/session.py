@@ -80,7 +80,7 @@ class _ImageWaiter:
 
 # ── Public entry point ─────────────────────────────────────────────────────────
 
-def start_session() -> ScanSession:
+def start_session(on_frame_captured=None) -> ScanSession:
     if os.path.isdir(config.IMAGE_CACHE):
         for fname in os.listdir(config.IMAGE_CACHE):
             fpath = os.path.join(config.IMAGE_CACHE, fname)
@@ -193,6 +193,8 @@ def start_session() -> ScanSession:
 
             print(f"  [Session] frame {i} stored  "
                   f"({len(session)}/{config.TOTAL_FRAMES} total)")
+            if on_frame_captured:
+                on_frame_captured(i, len(session))
 
             # 8. Advance motor (skip after last frame)
             if i < config.TOTAL_FRAMES - 1:

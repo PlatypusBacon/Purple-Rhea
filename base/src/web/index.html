@@ -393,7 +393,7 @@ function updateStatus(d) {
     addLog(d.type + (d.error ? ': ' + d.error : ''));
   }
 
-  if (d.state === 'done') {
+  if (d.state === 'done' || d.type === 'frame_captured') {
     loadFrames();
   }
 }

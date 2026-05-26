@@ -58,10 +58,15 @@ def publish_event(event_type: str, data: dict | None = None):
 
 # ── Scan thread ──────────────────────────────────────────────────────────────
 
+def _on_frame_captured(index, total_captured):
+    scan_status["frames_captured"] = total_captured
+    publish_event("frame_captured")
+
+
 def on_scan_triggered():
     """Called when the Start Scan button is pressed."""
     from main import main
-    main()
+    main(on_frame_captured=_on_frame_captured)
 
 
 def _scan_thread():
