@@ -109,25 +109,30 @@ def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[
             else:
                 print(f"  frame {frame.index:02d}: computed h={h:.4f}m from pitch={pose.imu_pitch_deg:.1f}°")
 
-        H     = config.CAMERA_HEIGHT
-        horiz = math.sqrt(max(h**2 - H**2, 0.0))
+        if abs(pose.imu_pitch_deg) > 1.0:
+            theta = math.radians(pose.imu_pitch_deg)
+        else:
+            H_cfg = config.CAMERA_HEIGHT
+            horiz_cfg = math.sqrt(max(h**2 - H_cfg**2, 0.0))
+            theta = math.atan2(H_cfg, horiz_cfg)
 
+        horiz = h * math.cos(theta)
         Cx = horiz * math.sin(servo_rad)
         Cy = horiz * math.cos(servo_rad)
-        Cz = H
+        Cz = h * math.sin(theta)
 
         print(f"  frame {frame.index:02d}: "
               f"servo={pose.servo_angle_deg:.1f}°  "
               f"imu_yaw={pose.imu_yaw_deg:.1f}°  "
               f"imu_pitch={pose.imu_pitch_deg:.1f}°  "
+              f"theta={math.degrees(theta):.1f}°  "
               f"h={h:.4f}m  horiz={horiz:.4f}m  "
               f"C=[{Cx:.4f}, {Cy:.4f}, {Cz:.4f}]")
 
-        # Sanity check: camera should not be at the origin
         C = np.array([Cx, Cy, Cz])
         if np.linalg.norm(C) < 0.01:
             print(f"  [WARN] frame {frame.index:02d}: camera centre is near origin! "
-                  f"Check radius/height values. h={h:.4f}, H={H:.4f}, horiz={horiz:.4f}")
+                  f"Check radius/height values. h={h:.4f}, horiz={horiz:.4f}")
 
         P = _projection_for_pose_with_h(pose, K, h)
         projections.append(P)
@@ -329,5 +334,5 @@ def _projection_for_pose_with_h(pose, K: np.ndarray, h: float) -> np.ndarray:
         f"det={det:.4f} align={align:.4f}"
     )
 
-    return K @ np.hstack([R_world_to_cam, t.reshape(3, 1)])
+    return K @ np.hstack([R, t.reshape(3, 1)])
 

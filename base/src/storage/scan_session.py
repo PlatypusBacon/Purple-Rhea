@@ -106,51 +106,26 @@ class CameraPose:
 
     def as_rotation_matrix(self) -> np.ndarray:
         """
-        Full rotation matrix matching _projection_for_pose exactly.
-        Used for debug look-direction print in compute_projections.
+        World-to-camera rotation matrix matching _projection_for_pose_with_h.
         """
-        servo_rad = math.radians(self.servo_angle_deg)
-        h     = self.radius
-        H     = config.CAMERA_HEIGHT
-        horiz = math.sqrt(max(h**2 - H**2, 0.0))
+        a = math.radians(self.servo_angle_deg)
+        h = self.radius
 
-        cam_pos = np.array([
-            horiz * math.sin(servo_rad),
-            horiz * math.cos(servo_rad),
-            H,
-        ], dtype=np.float64)
+        if abs(self.imu_pitch_deg) > 1.0:
+            theta = math.radians(self.imu_pitch_deg)
+        else:
+            H = config.CAMERA_HEIGHT
+            horiz = math.sqrt(max(h**2 - H**2, 0.0))
+            theta = math.atan2(H, horiz)
 
-        forward  = -cam_pos / np.linalg.norm(cam_pos)
-        world_up = np.array([0.0, 0.0, 1.0])
-        right    = np.cross(forward, world_up)
-        if np.linalg.norm(right) < 1e-6:
-            right = np.array([1.0, 0.0, 0.0])
-        right /= np.linalg.norm(right)
-        down = np.cross(right, forward)
-        down /= np.linalg.norm(down)
-        R_world_to_cam = np.column_stack([right, down, forward]).T
+        cos_a, sin_a = math.cos(a), math.sin(a)
+        cos_t, sin_t = math.cos(theta), math.sin(theta)
 
-        # IMU correction — identical to _projection_for_pose
-        dy = math.radians(_wrap_deg180(self.imu_yaw_corrected))
-        dp = math.radians(self.imu_pitch_deg)
-        dr = math.radians(self.imu_roll_deg)
+        right   = np.array([-cos_a,          sin_a,          0.0   ])
+        down    = np.array([ sin_a * sin_t,  cos_a * sin_t, -cos_t ])
+        forward = np.array([-sin_a * cos_t, -cos_a * cos_t, -sin_t ])
 
-        Rz = np.array([[ math.cos(dy), -math.sin(dy), 0],
-                    [ math.sin(dy),  math.cos(dy), 0],
-                    [ 0,             0,             1]])
-        Ry = np.array([[ math.cos(dp), 0, math.sin(dp)],
-                    [ 0,            1, 0            ],
-                    [-math.sin(dp), 0, math.cos(dp)]])
-        Rx = np.array([[1, 0,             0            ],
-                    [0, math.cos(dr), -math.sin(dr) ],
-                    [0, math.sin(dr),  math.cos(dr) ]])
-
-        R = R_world_to_cam @ (Rx @ Ry @ Rz)
-        U, _, Vt = np.linalg.svd(R)
-        R = U @ Vt
-        if np.linalg.det(R) < 0:
-            R = -R
-        return R
+        return np.stack([right, down, forward], axis=0)
 
 @dataclass
 class ScanFrame:
