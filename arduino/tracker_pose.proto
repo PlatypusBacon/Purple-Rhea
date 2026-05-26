@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+message TrackerPose {
+  uint32 step_index = 1;
+  float angle_deg = 2;
+  float roll = 3;
+  float pitch = 4;
+  float yaw = 5;
+  uint32 timestamp_ms = 6;
+}

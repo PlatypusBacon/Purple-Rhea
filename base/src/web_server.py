@@ -66,10 +66,6 @@ def on_scan_triggered():
 
 def _scan_thread():
     try:
-        scan_status["state"] = ScanState.SCANNING
-        scan_status["frames_captured"] = 0
-        scan_status["pipeline_stage"] = ""
-        scan_status["error"] = ""
         publish_event("scan_start")
 
         on_scan_triggered()
@@ -101,10 +97,27 @@ def api_scan_start():
     with scan_lock:
         if scan_status["state"] in (ScanState.SCANNING, ScanState.PROCESSING):
             return jsonify({"error": "Scan already in progress"}), 409
+        scan_status["state"] = ScanState.SCANNING
+        scan_status["frames_captured"] = 0
+        scan_status["pipeline_stage"] = ""
+        scan_status["error"] = ""
 
     t = threading.Thread(target=_scan_thread, daemon=True)
     t.start()
     return jsonify({"status": "started"})
+
+
+@app.route("/api/scan/reset", methods=["POST"])
+def api_scan_reset():
+    with scan_lock:
+        if scan_status["state"] in (ScanState.SCANNING, ScanState.PROCESSING):
+            return jsonify({"error": "Cannot reset while scan is running"}), 409
+        scan_status["state"] = ScanState.IDLE
+        scan_status["frames_captured"] = 0
+        scan_status["pipeline_stage"] = ""
+        scan_status["error"] = ""
+    publish_event("scan_reset")
+    return jsonify({"status": "reset"})
 
 
 @app.route("/api/events")
