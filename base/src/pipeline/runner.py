@@ -36,15 +36,17 @@ def run(session: ScanSession, on_progress=None) -> str:
         print(f"frame {i:02d}: camera centre = {C.round(3)}")
     _progress("[2/5] Projections computed")
 
-    # Step 3: Visual hull
-    from pipeline.visual_hull import compute_visual_hull
-    points_3d = compute_visual_hull(images, projections, grid_resolution=80)
-    _progress(f"[3/5] Visual hull: {len(points_3d)} points")
+    # Step 3: Dense reconstruction via depth-map fusion
+    from pipeline.depth_map_fusion import reconstruct_depth_fusion
+    points_3d, colors = reconstruct_depth_fusion(images, projections)
+    _progress(f"[3/5] Depth fusion: {len(points_3d)} points")
 
-    # Export .obj
+    # Export .ply (with colors) and .obj
+    from pipeline.export import write_obj, write_ply
     point_path = os.path.join(config.POINT_DIR, "reconstruction.obj")
-    from pipeline.export import write_obj
     write_obj(points_3d, point_path)
+    ply_path = os.path.join(config.POINT_DIR, "reconstruction.ply")
+    write_ply(points_3d, ply_path, colors)
     _progress("[4/5] Point cloud exported")
 
     # Surface reconstruction
