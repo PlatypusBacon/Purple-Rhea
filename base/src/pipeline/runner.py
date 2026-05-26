@@ -6,14 +6,17 @@ from storage.scan_session import ScanSession
 import os
 import config
 import numpy as np
-def run(session: ScanSession) -> str:
+def run(session: ScanSession, on_progress=None) -> str:
+    def _progress(stage):
+        print(stage)
+        if on_progress:
+            on_progress(stage)
+
     if not session.is_complete():
         missing = session.missing_indices()
         raise ValueError(f"Session incomplete — missing frames: {missing}")
 
-    print(f"\n{'='*60}")
-    print(f"  Starting pipeline — {len(session)} frames")
-    print(f"{'='*60}\n")
+    _progress("Starting pipeline")
 
     # Step 1: Load images
     images = []
@@ -22,7 +25,7 @@ def run(session: ScanSession) -> str:
         if img is None:
             raise RuntimeError(f"Could not decode image for frame {frame.index}")
         images.append(img)
-    print(f"[1/3] Loaded {len(images)} images")
+    _progress("[1/5] Loaded images")
 
     # Step 2: Pose computation (servo angles only — no features needed)
     from pipeline.pose_computation import compute_projections
@@ -31,12 +34,12 @@ def run(session: ScanSession) -> str:
         U, S, Vt = np.linalg.svd(P)
         C = Vt[-1, :3] / Vt[-1, 3]
         print(f"frame {i:02d}: camera centre = {C.round(3)}")
-    print(f"[2/3] Projections computed")
+    _progress("[2/5] Projections computed")
 
     # Step 3: Visual hull
     from pipeline.visual_hull import compute_visual_hull
     points_3d = compute_visual_hull(images, projections, grid_resolution=80)
-    print(f"[3/3] Visual hull: {len(points_3d)} points")
+    _progress(f"[3/5] Visual hull: {len(points_3d)} points")
 
     # Save point cloud
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
@@ -47,11 +50,13 @@ def run(session: ScanSession) -> str:
     obj_path = os.path.join(config.OUTPUT_DIR, "reconstruction.obj")
     from pipeline.export import write_obj
     write_obj(points_3d, obj_path)
+    _progress("[4/5] Point cloud exported")
 
     # Surface reconstruction
     if config.RUN_SURFACE_RECON:
         from pipeline.surface import reconstruct_surface
         mesh_path = reconstruct_surface(points_3d, obj_path, projections)
+        _progress("[5/5] Surface reconstruction done")
         print(f"  Mesh: {mesh_path}")
 
     return obj_path

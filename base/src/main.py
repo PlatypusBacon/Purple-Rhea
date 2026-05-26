@@ -8,7 +8,7 @@ from pipeline import runner
 import config
 
 
-def main(on_frame_captured=None):
+def main(on_frame_captured=None, on_pipeline_progress=None):
     print("Base Node running")
     session = start_session(on_frame_captured=on_frame_captured)
 
@@ -21,7 +21,7 @@ def main(on_frame_captured=None):
         else:
             print("Running pipeline with incomplete session (web mode).")
 
-    obj_path = runner.run(session)
+    obj_path = runner.run(session, on_progress=on_pipeline_progress)
     print(f"\nDone. Model saved to: {obj_path}")
 
 

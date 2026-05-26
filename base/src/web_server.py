@@ -63,10 +63,17 @@ def _on_frame_captured(index, total_captured):
     publish_event("frame_captured")
 
 
+def _on_pipeline_progress(stage):
+    scan_status["state"] = ScanState.PROCESSING
+    scan_status["pipeline_stage"] = stage
+    publish_event("pipeline_progress")
+
+
 def on_scan_triggered():
     """Called when the Start Scan button is pressed."""
     from main import main
-    main(on_frame_captured=_on_frame_captured)
+    main(on_frame_captured=_on_frame_captured,
+         on_pipeline_progress=_on_pipeline_progress)
 
 
 def _scan_thread():
