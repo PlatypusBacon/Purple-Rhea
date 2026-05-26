@@ -135,15 +135,6 @@ def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[
 # --------------------------------------------------------------------------- #
 
 def _recover_projections_pnp(frames, matches, keypoints_per_frame, K):
-    """
-    Frame 0 = identity anchor.
-    Triangulate frame 0 vs each other frame directly,
-    then use solvePnPRansac to place every frame independently in the
-    same metric coordinate system. No error accumulation across frames.
-
-    FIX: triangulation now uses projections[0] as the left projection
-         (the actual anchor), not a freshly constructed identity matrix.
-    """
     import cv2
     n = len(frames)
     projections = [None] * n
@@ -152,6 +143,15 @@ def _recover_projections_pnp(frames, matches, keypoints_per_frame, K):
     projections[0] = K @ np.hstack([R0, t0])
     print(f"    frame 00: identity (anchor)")
     print(f"    anchor P:\n{projections[0]}")
+
+    # ── NEW: servo priors so triangulation has two distinct projections ──
+    servo_projections = [
+        _projection_for_pose_with_h(
+            f.pose, K,
+            f.pose.radius if f.pose.radius > 0.01 else config.NOMINAL_RADIUS
+        )
+        for f in frames
+    ]
 
     for i in range(1, n):
         key = (0, i) if (0, i) in matches else None
@@ -168,16 +168,10 @@ def _recover_projections_pnp(frames, matches, keypoints_per_frame, K):
         pts_i = np.float32([kps_i[m.trainIdx].pt for m in dmatches])
         print(f"    frame {i:02d}: {len(dmatches)} matches to frame 00")
 
-        # FIX: use projections[0] (correct world-space anchor), not identity
-        # Original code used: P_init = K @ np.hstack([np.eye(3), np.zeros((3, 1))])
-        # which is the same as projections[0] here, but was recomputed incorrectly
-        # as a standalone variable rather than guaranteed to match projections[0].
-        X4d = cv2.triangulatePoints(projections[0], projections[0], pts_0.T, pts_i.T)
-        # NOTE: the second arg above should ideally be a prior estimate for frame i,
-        # but we don't have that yet at this point, so we use projections[0] as a
-        # dummy and rely on PnP to correct it. For better initialisation you could
-        # use the servo-angle projection as the second arg.
-        X3d = (X4d[:3] / X4d[3]).T  # (M, 3)
+        # ── FIX: use servo prior for frame i as second projection ──
+        X4d = cv2.triangulatePoints(projections[0], servo_projections[i], pts_0.T, pts_i.T)
+        X3d = (X4d[:3] / X4d[3]).T
+
 
         print(f"    frame {i:02d}: triangulated {len(X3d)} 3D points, "
               f"depth range: {X3d[:, 2].min():.4f}..{X3d[:, 2].max():.4f}")
@@ -270,48 +264,82 @@ DIST_COEFFS = np.zeros(5, dtype=np.float64)
 
 def _projection_for_pose_with_h(pose, K: np.ndarray, h: float) -> np.ndarray:
     """
-    Build projection matrix for the given pose, using an explicit h (metres).
-    This is the corrected version that does NOT re-read pose.radius so the
-    caller's fallback logic is respected.
+    Build projection matrix for the given pose.
+    
+    Camera orbits the origin at azimuth = servo_angle_deg, at a slant
+    distance h from the origin. Its height is CAMERA_HEIGHT, so the
+    horizontal distance is horiz = sqrt(h² - H²).
+    
+    The camera is tilted DOWN toward the origin: pitch = arctan(H / horiz).
+    Azimuth is the servo angle (rotation about world Z).
     """
     servo_rad = math.radians(pose.servo_angle_deg)
     H     = config.CAMERA_HEIGHT
     horiz = math.sqrt(max(h**2 - H**2, 0.0))
 
+    # Camera centre in world space
     C = np.array([
         horiz * math.sin(servo_rad),
         horiz * math.cos(servo_rad),
         H,
     ], dtype=np.float64)
 
-    # Camera always points inward toward origin
-    forward  = -C / np.linalg.norm(C)
-    world_up = np.array([0., 0., 1.])
-    right    = np.cross(forward, world_up)
-    norm_r   = np.linalg.norm(right)
-    if norm_r < 1e-6:
-        # Camera pointing straight up/down — degenerate; use X as right
-        print(f"    [WARN] degenerate right vector (camera near zenith/nadir). "
-              f"forward={forward.round(4)}")
-        right = np.array([1., 0., 0.])
-    else:
-        right /= norm_r
-    down     = np.cross(right, forward)
-    down    /= np.linalg.norm(down)
-    R_world_to_cam = np.column_stack([right, down, forward]).T
+    # Tilt angle downward from horizontal toward the origin
+    pitch_down = math.atan2(H, horiz)   # positive = tilting down
+
+    # --- Build R as: first rotate around world-Z by servo_angle (azimuth),
+    #     then tilt down by pitch_down around the camera's local X axis.
+    #
+    # In the camera's "facing outward at 0°" frame:
+    #   camera X = world X  (points right along the orbit tangent)
+    #   camera Y = world Z  (points up — becomes "up" in image before tilt)
+    #   camera Z = world Y  (points away from origin — optical axis pre-tilt)
+    #
+    # After azimuth rotation by servo_rad:
+    #   right_world = [ cos(servo),  -sin(servo), 0 ]
+    #   (tangent to the orbit circle, pointing camera-right)
+    #
+    # After pitch (tilt down): optical axis tips toward the ground.
+
+    cos_s = math.cos(servo_rad)
+    sin_s = math.sin(servo_rad)
+    cos_p = math.cos(pitch_down)
+    sin_p = math.sin(pitch_down)
+
+    # Camera right = tangent to orbit (perpendicular to radial direction, in XY plane)
+    right = np.array([ cos_s, -sin_s, 0.0], dtype=np.float64)
+
+    # Camera forward AFTER pitch: starts pointing outward (+Y rotated by servo),
+    # then pitched down by pitch_down
+    #   pre-pitch forward (radial outward) = [-sin_s, -cos_s, 0]  (points TO origin, negated)
+    #   but we want the camera to look AT the origin, so forward = inward = [sin_s, cos_s, 0]
+    #   pitched down: forward.z -= sin_p, forward.xy *= cos_p
+    forward = np.array([
+         sin_s * cos_p,
+         cos_s * cos_p,
+        -sin_p,           # negative Z = downward in world (Z up convention)
+    ], dtype=np.float64)
+
+    # Camera down = cross(right, forward)  [in a right-handed R,D,F camera frame]
+    down = np.cross(right, forward)
+    down /= np.linalg.norm(down)
+
+    # Re-orthogonalise forward against right (numerical safety)
+    forward = np.cross(down, right)   # RDF: F = D×R ... wait, RDF: R×D = -F, so F = -(R×D)
+    # Actually in a right-handed camera (X right, Y down, Z forward):
+    #   Z = X × Y  →  forward = cross(right, down)
+    forward = np.cross(right, down)
+    forward /= np.linalg.norm(forward)
+
+    # Rows of R_world_to_cam: [right; down; forward]
+    R_world_to_cam = np.stack([right, down, forward], axis=0)  # (3,3)
 
     t = -R_world_to_cam @ C
 
     print(f"    [proj] servo={pose.servo_angle_deg:.0f}°  "
-          f"pitch={pose.imu_pitch_deg:.1f}°  "
+          f"pitch_down={math.degrees(pitch_down):.1f}°  "
           f"h={h:.4f}m  horiz={horiz:.4f}m  "
           f"C={C.round(3)}  t={t.round(3)}")
 
     return K @ np.hstack([R_world_to_cam, t.reshape(3, 1)])
 
-
-# Keep old signature for any external callers that use pose.radius directly
-def _projection_for_pose(pose, K: np.ndarray) -> np.ndarray:
-    """Legacy wrapper — prefers pose.radius, falls back to NOMINAL_RADIUS."""
-    h = pose.radius if pose.radius > 0.01 else config.NOMINAL_RADIUS
-    return _projection_for_pose_with_h(pose, K, h)
