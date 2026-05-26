@@ -34,7 +34,9 @@ VOXEL_SIZE                  = None
 SMOOTH_ITERATIONS           = 0
 import os as _os
 _PROJECT_ROOT               = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..")
+MESH_DIR                  = _os.path.join(_PROJECT_ROOT, "output/mesh")
 OUTPUT_DIR                  = _os.path.join(_PROJECT_ROOT, "output")
+POINT_DIR                  = _os.path.join(_PROJECT_ROOT, "output/point")
 IMAGE_CACHE                 = _os.path.join(_PROJECT_ROOT, "output", "frames")
 DEBUG_MODE                  = True
 DEBUG_VIZ                   = True
