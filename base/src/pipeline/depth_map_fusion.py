@@ -307,7 +307,7 @@ def _bbox_filter(points, colors):
     return points, colors
 
 
-def _statistical_filter(points, colors, nb=20, std_ratio=2.0):
+def _statistical_filter(points, colors, nb=30, std_ratio=1.5):
     if len(points) < nb + 1:
         return points, colors
     try:
