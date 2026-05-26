@@ -22,17 +22,20 @@ import config
 #  Rig geometry                                                                #
 # --------------------------------------------------------------------------- #
 
-def compute_camera_distance(pitch_deg: float) -> float | None:
+def compute_camera_distance(theta: float) -> float | None:
     """
     Compute 3D slant distance h from camera to turntable centre.
 
         h = sqrt((r + y·cos θ + sqrt(x² - (H - y·sin θ)²))² + H²)
+    This was calculated using the rig geometry as a 3 fixed length problem with movable points.
+    TO do this one other length had to be defined as constant, this was chosen as the height of the camera.
+    this is defined as CAMERA_HEIGHT in config.py. The formula is then derived by solving for the horizontal distance from the camera to the origin in terms of the pitch angle, 
+    and then using Pythagorean theorem to get the slant distance h.
 
     pitch_deg — IMU pitch (positive = tilting down toward centre)
     Returns None if inner sqrt argument is negative (physically inconsistent
     rig constants for this angle) — caller should fall back to NOMINAL_RADIUS.
     """
-    theta = math.radians(pitch_deg)
 
     r = config.RIG_BASE_LENGTH
     x = config.RIG_MIDDLE_LENGTH
@@ -42,13 +45,13 @@ def compute_camera_distance(pitch_deg: float) -> float | None:
     inner = x**2 - (H - y * math.sin(theta))**2
     if inner < 0:
         print(f"    [WARN] compute_camera_distance: inner sqrt negative "
-              f"(pitch={pitch_deg:.1f}°, inner={inner:.6f}) — "
+              f"(pitch={math.degrees(theta):.1f}°, inner={inner:.6f}) — "
               f"using NOMINAL_RADIUS={config.NOMINAL_RADIUS:.4f}m")
         return None
 
     horizontal = r + y * math.cos(theta) + math.sqrt(inner)
     h = math.sqrt(horizontal**2 + H**2)
-    print(f"    [pose] pitch={pitch_deg:.2f}° → horiz={horizontal:.4f}m  h={h:.4f}m")
+    print(f"    [pose] pitch={math.degrees(theta):.2f}° → horiz={horizontal:.4f}m  h={h:.4f}m")
     return h
 
 
@@ -80,19 +83,21 @@ def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[
         #      and fall back to NOMINAL_RADIUS when it fails or radius=0.     #
         # ------------------------------------------------------------------ #
         tracker_radius = pose.radius
+        theta = math.radians(pose.imu_pitch_deg)
         if tracker_radius > 0.01:
             # Tracker provided a plausible radius
             h = tracker_radius
             print(f"  frame {frame.index:02d}: using tracker radius h={h:.4f}m")
         else:
             # Tracker radius zero/invalid — compute from rig geometry + pitch
-            h = compute_camera_distance(pose.imu_pitch_deg)
+
+            h = compute_camera_distance(theta)
             if h is None:
                 h = config.NOMINAL_RADIUS
                 print(f"  frame {frame.index:02d}: rig formula failed, "
                       f"using NOMINAL_RADIUS={h:.4f}m")
             else:
-                print(f"  frame {frame.index:02d}: computed h={h:.4f}m from pitch={pose.imu_pitch_deg:.1f}°")
+                print(f"  frame {frame.index:02d}: computed h={h:.4f}m from pitch={math.degrees(theta):.1f}°")
 
         H     = config.CAMERA_HEIGHT
         horiz = math.sqrt(max(h**2 - H**2, 0.0))
@@ -104,7 +109,7 @@ def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[
         print(f"  frame {frame.index:02d}: "
               f"servo={pose.servo_angle_deg:.1f}°  "
               f"imu_yaw={pose.imu_yaw_deg:.1f}°  "
-              f"imu_pitch={pose.imu_pitch_deg:.1f}°  "
+              f"imu_pitch={math.degrees(theta):.1f}°  "
               f"h={h:.4f}m  horiz={horiz:.4f}m  "
               f"C=[{Cx:.4f}, {Cy:.4f}, {Cz:.4f}]")
 
@@ -114,7 +119,7 @@ def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[
             print(f"  [WARN] frame {frame.index:02d}: camera centre is near origin! "
                   f"Check radius/height values. h={h:.4f}, H={H:.4f}, horiz={horiz:.4f}")
 
-        P = _projection_for_pose_with_h(pose, K, h)
+        P = _projection_for_pose_with_h(pose, K, h, theta)
         projections.append(P)
 
         # Decompose and print look direction for debugging
@@ -262,7 +267,7 @@ DIST_COEFFS = np.zeros(5, dtype=np.float64)
 #  Per-frame projection (internal — takes explicit h)                         #
 # --------------------------------------------------------------------------- #
 
-def _projection_for_pose_with_h(pose, K: np.ndarray, h: float) -> np.ndarray:
+def _projection_for_pose_with_h(pose, K: np.ndarray, h: float, theta: float) -> np.ndarray:
     """
     Build projection matrix P = K [R | t] for one frame.
 
@@ -271,9 +276,9 @@ def _projection_for_pose_with_h(pose, K: np.ndarray, h: float) -> np.ndarray:
       - Z axis: up
       - At servo_angle=0 the camera sits on the +Y axis
 
-    h     = slant distance from camera to world origin.
-    H     = CAMERA_HEIGHT (physical rig constant).
-    theta = atan2(H, horiz) — tilt angle below horizontal, derived from h and H.
+    h     = slant distance from camera to world origin calculated from the following
+    H     = CAMERA_HEIGHT (physical rig constant unfortunately necessary).
+    theta = ilt angle below horizontal, from the yaw of the xiao
 
     Camera position: C = [horiz·sin a, horiz·cos a, H]
     Optical axis:    radial inward at angle theta below horizontal.
@@ -281,7 +286,6 @@ def _projection_for_pose_with_h(pose, K: np.ndarray, h: float) -> np.ndarray:
     a = math.radians(pose.servo_angle_deg)
     H     = config.CAMERA_HEIGHT
     horiz = math.sqrt(max(h**2 - H**2, 0.0))
-    theta = math.atan2(H, horiz)
 
     C = np.array([horiz * math.sin(a), horiz * math.cos(a), H], dtype=np.float64)
 
