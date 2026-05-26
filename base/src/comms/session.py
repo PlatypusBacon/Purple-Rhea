@@ -12,6 +12,7 @@ import config
 from storage.scan_session import ScanSession, ScanFrame, CameraPose
 from pipeline.pose_computation import compute_camera_distance
 from tracker_pose_pb2 import TrackerPose   # generated from .proto
+from google.protobuf.message import DecodeError
 
 # ── Stepper motor ──────────────────────────────────────────────────────────────
 IN1, IN2, IN3, IN4 = 17, 18, 27, 22
@@ -29,6 +30,72 @@ _DRIVEN_TEETH         = 115
 _GEAR_RATIO           = _DRIVEN_TEETH / _DRIVER_TEETH
 _STEPS_PER_OUTPUT_REV = _STEPS_PER_REV * _GEAR_RATIO
 _STEPS_PER_DEGREE     = _STEPS_PER_OUTPUT_REV / 360.0
+
+
+def _wrap_deg180(angle_deg: float) -> float:
+    return (angle_deg + 180.0) % 360.0 - 180.0
+
+
+class _YawFusion:
+    """
+    Tracks IMU yaw as a continuous relative angle and maps it onto the
+    commanded turntable progression.
+    """
+    def __init__(self, step_deg: float) -> None:
+        self._step_deg = step_deg
+        self._prev_raw_yaw: float | None = None
+        self._rel_unwrapped = 0.0
+        self._sign = 1.0
+        self._sign_locked = False
+
+    def update(self, raw_yaw_deg: float, expected_deg: float, frame_idx: int):
+        if self._prev_raw_yaw is None:
+            self._prev_raw_yaw = raw_yaw_deg
+            self._rel_unwrapped = 0.0
+            return expected_deg, 0.0, 0.0
+
+        step_delta = _wrap_deg180(raw_yaw_deg - self._prev_raw_yaw)
+        self._prev_raw_yaw = raw_yaw_deg
+
+        # Reject occasional wrap/glitch jumps that are too large for one frame.
+        if abs(step_delta) <= 45.0:
+            self._rel_unwrapped += step_delta
+
+        rel = self._rel_unwrapped
+        if (not self._sign_locked and frame_idx >= 1 and
+                abs(rel) >= (0.5 * self._step_deg)):
+            err_pos = abs(_wrap_deg180(rel - expected_deg))
+            err_neg = abs(_wrap_deg180(-rel - expected_deg))
+            self._sign = -1.0 if err_neg + 1.0 < err_pos else 1.0
+            self._sign_locked = True
+
+        imu_rel = self._sign * rel
+        residual = _wrap_deg180(imu_rel - expected_deg)
+        residual = max(-15.0, min(15.0, residual))
+        fused = (expected_deg + residual) % 360.0
+        return fused, imu_rel, residual
+
+
+class _ImuFilter:
+    """Simple low-pass filter for IMU pitch/roll used by reconstruction."""
+    def __init__(self, alpha: float = 0.35) -> None:
+        self._alpha = alpha
+        self._pitch: float | None = None
+        self._roll: float | None = None
+
+    def update(self, pitch_deg: float, roll_deg: float):
+        # Keep values in a physically plausible range for this rig.
+        pitch_deg = max(-89.0, min(89.0, pitch_deg))
+        roll_deg = max(-89.0, min(89.0, roll_deg))
+
+        if self._pitch is None:
+            self._pitch = pitch_deg
+            self._roll = roll_deg
+        else:
+            self._pitch = self._alpha * pitch_deg + (1.0 - self._alpha) * self._pitch
+            self._roll = self._alpha * roll_deg + (1.0 - self._alpha) * self._roll
+
+        return self._pitch, self._roll
 
 
 def _step_motor(chip: int, n_steps: int, phase: int = 0) -> int:
@@ -111,9 +178,13 @@ def start_session(on_frame_captured=None) -> ScanSession:
         jpeg_bytes = data[2 + pose_len :]
 
         pose_proto = TrackerPose()
-        pose_proto.ParseFromString(pose_bytes)
+        try:
+            pose_proto.ParseFromString(pose_bytes)
+        except DecodeError:
+            print("  [MQTT] pose protobuf decode failed — discarding frame")
+            return
 
-        print(f"  [MQTT] received — yaw={pose_proto.yaw:.1f}°  "
+        print(f"  [MQTT] received — frame={pose_proto.frame_index}  yaw={pose_proto.yaw:.1f}°  "
               f"pitch={pose_proto.pitch:.1f}°  "
               f"jpeg={len(jpeg_bytes):,}B")
         waiter.set((jpeg_bytes, pose_proto))
@@ -134,6 +205,9 @@ def start_session(on_frame_captured=None) -> ScanSession:
     _motor_phase  = 0
     _accumulator  = 0.0
     imu_yaw_offset = None   # set on frame 0
+    last_pose_frame_index = None
+    yaw_fusion = _YawFusion(config.STEP_DEGREES)
+    imu_filter = _ImuFilter(alpha=0.35)
 
     try:
         for i in range(config.TOTAL_FRAMES):
@@ -153,13 +227,38 @@ def start_session(on_frame_captured=None) -> ScanSession:
                 imu_yaw_offset = pose_proto.yaw
                 print(f"  [IMU] yaw offset locked at {imu_yaw_offset:.1f}°")
 
+            if last_pose_frame_index is not None and pose_proto.frame_index == last_pose_frame_index:
+                print("  [WARN] tracker pose frame_index did not advance "
+                      f"({pose_proto.frame_index}) — UART data may be stale")
+            last_pose_frame_index = pose_proto.frame_index
+
+            fused_yaw_deg, imu_rel_deg, yaw_residual = yaw_fusion.update(
+                pose_proto.yaw, angle_deg, i
+            )
+            print("  [Yaw] cmd={:.1f}°  imu_rel={:.1f}°  residual={:+.1f}°  used={:.1f}°"
+                  .format(angle_deg, imu_rel_deg, yaw_residual, fused_yaw_deg))
+
+            filt_pitch_deg, filt_roll_deg = imu_filter.update(
+                pose_proto.pitch, pose_proto.roll
+            )
+            print("  [IMU] pitch raw={:.1f}° filt={:.1f}°  roll raw={:.1f}° filt={:.1f}°"
+                  .format(pose_proto.pitch, filt_pitch_deg, pose_proto.roll, filt_roll_deg))
+
             # 4. Compute camera-to-centre distance from pitch + rig geometry
-            h = compute_camera_distance(pose_proto.pitch)
-            if h is not None:
+            h = compute_camera_distance(filt_pitch_deg)
+            radius_from_tracker = (
+                pose_proto.radius
+                if pose_proto.radius_valid and 0.05 <= pose_proto.radius <= 2.0
+                else None
+            )
+            if h is not None and radius_from_tracker is not None:
+                radius = 0.7 * h + 0.3 * radius_from_tracker
+                radius_source = "geometry+imu"
+            elif h is not None:
                 radius = h
                 radius_source = "geometry"
-            elif pose_proto.radius_valid:
-                radius = pose_proto.radius
+            elif radius_from_tracker is not None:
+                radius = radius_from_tracker
                 radius_source = "imu_estimator"
             else:
                 radius = config.NOMINAL_RADIUS
@@ -168,11 +267,11 @@ def start_session(on_frame_captured=None) -> ScanSession:
 
             # 5. Build pose
             pose = CameraPose.from_proto(
-                servo_angle_deg = angle_deg,
+                servo_angle_deg = fused_yaw_deg,
                 radius          = radius,
                 imu_yaw_deg     = pose_proto.yaw,
-                imu_pitch_deg   = pose_proto.pitch,
-                imu_roll_deg    = pose_proto.roll,
+                imu_pitch_deg   = filt_pitch_deg,
+                imu_roll_deg    = filt_roll_deg,
                 imu_yaw_offset  = imu_yaw_offset,
             )
 

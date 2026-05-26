@@ -5,6 +5,11 @@ from typing import Optional
 import numpy as np
 import math
 
+
+def _wrap_deg180(angle_deg: float) -> float:
+    return (angle_deg + 180.0) % 360.0 - 180.0
+
+
 imu_roll_offset:  float = 0.0
 imu_pitch_offset: float = 0.0
 @dataclass
@@ -12,7 +17,7 @@ class CameraPose:
     """
     Pose derived from the XIAO-nRF52840 Kalman filter output.
 
-    servo_angle_deg  — turntable step angle; drives camera centre position C
+    servo_angle_deg  — effective turntable yaw used for camera centre position C
     imu_yaw_deg      — tracker body yaw; corrects camera orientation in-mount
     imu_pitch_deg    — tracker body pitch
     imu_roll_deg     — tracker body roll
@@ -48,7 +53,7 @@ class CameraPose:
     ) -> "CameraPose":
         """
         Primary constructor for live capture.
-        servo_angle_deg  — turntable position (i * STEP_DEGREES)
+        servo_angle_deg  — effective yaw (commanded angle optionally corrected by IMU)
         imu_*            — raw tracker proto values
         imu_yaw_offset   — yaw at frame 0, subtracted to give relative correction
         """
@@ -126,7 +131,7 @@ class CameraPose:
         R_world_to_cam = np.column_stack([right, down, forward]).T
 
         # IMU correction — identical to _projection_for_pose
-        dy = math.radians(self.imu_yaw_corrected)
+        dy = math.radians(_wrap_deg180(self.imu_yaw_corrected))
         dp = math.radians(self.imu_pitch_deg)
         dr = math.radians(self.imu_roll_deg)
 
@@ -140,7 +145,12 @@ class CameraPose:
                     [0, math.cos(dr), -math.sin(dr) ],
                     [0, math.sin(dr),  math.cos(dr) ]])
 
-        return R_world_to_cam @ (Rx @ Ry @ Rz)
+        R = R_world_to_cam @ (Rx @ Ry @ Rz)
+        U, _, Vt = np.linalg.svd(R)
+        R = U @ Vt
+        if np.linalg.det(R) < 0:
+            R = -R
+        return R
 
 @dataclass
 class ScanFrame:
