@@ -10,9 +10,9 @@ import config
 
 def main(on_frame_captured=None, on_pipeline_progress=None):
     print("Base Node running")
-    #session = start_session(on_frame_captured=on_frame_captured)
+    session = start_session(on_frame_captured=on_frame_captured)
     #session = start_disk_ble_session(on_frame_captured=on_frame_captured)
-    session = start_disk_session()
+    #session = start_disk_session()
 
 
     if not session.is_complete():
