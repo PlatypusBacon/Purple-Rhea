@@ -4,6 +4,7 @@ Swap serial_receiver for mqtt_receiver when MQTT is ready.
 """
 
 from comms.disk_session import start_disk_session
+from comms.session import start_session
 from pipeline import runner
 import config
 
