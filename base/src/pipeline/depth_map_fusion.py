@@ -175,13 +175,17 @@ def _detect_plate_ellipse(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (15, 15), 0)
 
+    # Otsu threshold (inverted) — plate is dark against a bright background
     _, dark_mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
+    # Erode to remove small noise blobs and thin connections between regions
     erode_k = np.ones((25, 25), np.uint8)
     eroded = cv2.erode(dark_mask, erode_k, iterations=1)
 
+    # Find connected components and pick the best candidate for the plate
     n_comp, labels, stats, centroids = cv2.connectedComponentsWithStats(eroded)
 
+    # Score each component: prefer large blobs near the image centre
     img_cx, img_cy = w_img / 2, h_img / 2
     best_idx = -1
     best_score = -1
@@ -199,6 +203,7 @@ def _detect_plate_ellipse(img):
     if best_idx <= 0:
         return None
 
+    # Extract the winning component's contour and fit an ellipse to it
     plate_eroded = (labels == best_idx).astype(np.uint8) * 255
     cnts, _ = cv2.findContours(plate_eroded, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if cnts and len(cnts[0]) >= 5:
@@ -207,7 +212,8 @@ def _detect_plate_ellipse(img):
 
 
 def _compute_average_ellipse(images):
-    """Detect plate ellipse in each frame, return the median ellipse."""
+    """Detect plate ellipse in each frame, return the median ellipse.
+    Averaging across frames makes the result robust to single-frame detection failures."""
     ellipses = []
     for img in images:
         e = _detect_plate_ellipse(img)
@@ -217,6 +223,7 @@ def _compute_average_ellipse(images):
     if not ellipses:
         return None
 
+    # Take the median of centre, axes, and angle independently
     centres = np.array([(e[0][0], e[0][1]) for e in ellipses])
     axes = np.array([(e[1][0], e[1][1]) for e in ellipses])
     angles = np.array([e[2] for e in ellipses])
@@ -234,16 +241,19 @@ def _compute_average_ellipse(images):
 
 def _project_disk_mask(img, frame_idx, plate_ellipse=None):
     """
-    Mask the turntable plate region (plate + object), excluding the bright background.
-    Uses a pre-computed plate ellipse if provided, otherwise detects per-frame.
+    Create a binary mask covering the turntable plate region (plate + object),
+    excluding the bright background. Only pixels inside this mask are used
+    for optical flow correspondences during depth fusion.
     """
     h_img, w_img = img.shape[:2]
 
+    # Use the averaged ellipse if available, otherwise detect per-frame
     if plate_ellipse is not None:
         ellipse = plate_ellipse
     else:
         ellipse = _detect_plate_ellipse(img)
 
+    # Draw filled ellipse as the mask; fall back to Otsu if detection failed
     mask = np.zeros((h_img, w_img), dtype=np.uint8)
     if ellipse is not None:
         cv2.ellipse(mask, ellipse, 255, -1)
@@ -261,6 +271,7 @@ def _project_disk_mask(img, frame_idx, plate_ellipse=None):
 
 
 def _save_mask_debug(img, mask, frame_idx):
+    """Save raw mask and a debug overlay (background dimmed, mask contour in green)."""
     os.makedirs("output/silhouettes", exist_ok=True)
     cv2.imwrite(f"output/silhouettes/mask_{frame_idx:02d}.png", mask)
     debug = img.copy()
