@@ -23,21 +23,20 @@ FLOW_SCALE       = 0.5
 DEBUG_DIR        = "output/depth_debug"
 
 
-def reconstruct_depth_fusion(images, projections, masks=None):
+def reconstruct_depth_fusion(images, projections, masks):
     """
     Returns (N,3) point cloud and (N,3) BGR color array.
     """
     n = len(images)
-
     if masks is None:
         print(f"\n[depth] Building masks for {n} images...")
         plate_ellipse = _compute_average_ellipse(images)
         masks = [_project_disk_mask(img, P, i, plate_ellipse) for i, (img, P) in
-                 enumerate(zip(images, projections))]
+                enumerate(zip(images, projections))]
 
     os.makedirs(DEBUG_DIR, exist_ok=True)
     _save_camera_centres(projections)
-
+    
     all_pts = []
     all_col = []
 
@@ -71,7 +70,7 @@ def reconstruct_depth_fusion(images, projections, masks=None):
 
 
 def _save_camera_centres(projections):
-    """Write camera centres to a debug PLY so you can visually check the orbit."""
+    """Write camera centres to a debug PLY to visually check the orbit."""
     path = os.path.join(DEBUG_DIR, "cameras.ply")
     centres = []
     for P in projections:
@@ -93,24 +92,24 @@ def _save_camera_centres(projections):
 
 
 def _process_pair(img1, img2, P1, P2, mask1, mask2, idx1, idx2):
-    # Downscale for faster optical flow
+    # Downscale and grayscale for faster optical flow
     s = FLOW_SCALE
     small1 = cv2.resize(cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY), None, fx=s, fy=s)
     small2 = cv2.resize(cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY), None, fx=s, fy=s)
-
+    # compute, calculating pyramid and returning h,w,2 array of flow vectors in pixels (dx, dy)
     flow_small = cv2.calcOpticalFlowFarneback(
         small1, small2, None,
         pyr_scale=0.5, levels=3, winsize=15,
         iterations=3, poly_n=5, poly_sigma=1.2, flags=0,
     )
-
+    # get coords for masked pixels
     h_img, w_img = mask1.shape
     ys, xs = np.where(mask1 > 0)
 
     if len(xs) == 0:
         print(f"  pair {idx1:02d}-{idx2:02d}: empty mask, skipping")
         return np.zeros((0, 3)), np.zeros((0, 3), dtype=np.uint8)
-
+    # subsamples as flow creates many points that are redundant and
     step = max(1, FLOW_SUBSAMPLE)
     xs, ys = xs[::step], ys[::step]
 
@@ -233,7 +232,7 @@ def _compute_average_ellipse(images):
     return (med_centre, med_axes, med_angle)
 
 
-def _project_disk_mask(img, P, frame_idx, plate_ellipse=None):
+def _project_disk_mask(img, frame_idx, plate_ellipse=None):
     """
     Mask the turntable plate region (plate + object), excluding the bright background.
     Uses a pre-computed plate ellipse if provided, otherwise detects per-frame.
