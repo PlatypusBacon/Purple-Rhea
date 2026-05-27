@@ -59,29 +59,23 @@ def compute_camera_distance(theta: float) -> float | None:
 #  Public entry point                                                          #
 # --------------------------------------------------------------------------- #
 
-def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[np.ndarray]:
+def compute_projections(frames) -> list[np.ndarray]:
     """
-    Two modes:
-      - matches + keypoints provided → PnP from frame-0 anchor (accurate)
-      - neither provided             → synthesised from servo/IMU angles
+    Synthesises a 3x4 projection matrix P = K [R | t] for each frame
+    using the servo angle, IMU pitch, and camera distance stored in
+    each frame's CameraPose.
     """
     K = _camera_intrinsics()
     print(f"\n[pose] Intrinsics K:\n{K}\n")
 
-    if matches is not None and keypoints_per_frame is not None:
-        print("[pose] Using PnP mode")
-        return _recover_projections_pnp(frames, matches, keypoints_per_frame, K)
-
     print("[pose] Using servo/IMU synthesis mode")
-    horiz = config.NOMINAL_RADIUS
-    H     = config.CAMERA_HEIGHT
-    theta = math.atan2(H, horiz)
-    print(f"[pose] Fixed orbit: horiz={horiz:.4f}m  H={H:.4f}m  "
-          f"theta={math.degrees(theta):.1f}°")
+    H = config.CAMERA_HEIGHT
 
     projections = []
     for frame in frames:
-        pose = frame.pose
+        pose  = frame.pose
+        horiz = math.sqrt(max(pose.radius**2 - H**2, 0.0))
+        theta = math.radians(pose.imu_pitch_deg)
         servo_rad = math.radians(pose.servo_angle_deg)
 
         Cx = horiz * math.sin(servo_rad)
@@ -90,16 +84,16 @@ def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[
 
         print(f"  frame {frame.index:02d}: "
               f"servo={pose.servo_angle_deg:.1f}°  "
+              f"radius={pose.radius:.4f}m  horiz={horiz:.4f}m  theta={math.degrees(theta):.2f}°  "
               f"C=[{Cx:.4f}, {Cy:.4f}, {Cz:.4f}]")
 
         P = _build_projection(pose.servo_angle_deg, K, horiz, H, theta)
         projections.append(P)
 
-        # Decompose and print look direction for debugging
         Rt = np.linalg.inv(K) @ P
         R_check = Rt[:, :3]
         t_check = Rt[:, 3]
-        look = R_check[2, :]          # third row = forward direction in cam space
+        look = R_check[2, :]
         C_recover = -R_check.T @ t_check
         print(f"  frame {frame.index:02d}: look direction = {look.round(4)}, "
               f"recovered C = {C_recover.round(4)}")
@@ -108,99 +102,6 @@ def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[
     return projections
 
 
-# --------------------------------------------------------------------------- #
-#  PnP pose recovery                                                           #
-# --------------------------------------------------------------------------- #
-
-def _recover_projections_pnp(frames, matches, keypoints_per_frame, K):
-    import cv2
-    n = len(frames)
-    projections = [None] * n
-
-    R0, t0 = np.eye(3), np.zeros((3, 1))
-    projections[0] = K @ np.hstack([R0, t0])
-    print(f"    frame 00: identity (anchor)")
-    print(f"    anchor P:\n{projections[0]}")
-
-    horiz = config.NOMINAL_RADIUS
-    H     = config.CAMERA_HEIGHT
-    theta = math.atan2(H, horiz)
-    servo_projections = [
-        _build_projection(f.pose.servo_angle_deg, K, horiz, H, theta)
-        for f in frames
-    ]
-
-    for i in range(1, n):
-        key = (0, i) if (0, i) in matches else None
-        if key is None:
-            projections[i] = projections[i - 1]
-            print(f"    frame {i:02d}: no match to frame 00 — copied from frame {i-1:02d}")
-            continue
-
-        dmatches  = matches[key]
-        kps_0     = keypoints_per_frame[0]
-        kps_i     = keypoints_per_frame[i]
-
-        pts_0 = np.float32([kps_0[m.queryIdx].pt for m in dmatches])
-        pts_i = np.float32([kps_i[m.trainIdx].pt for m in dmatches])
-        print(f"    frame {i:02d}: {len(dmatches)} matches to frame 00")
-
-        # ── FIX: use servo prior for frame i as second projection ──
-        X4d = cv2.triangulatePoints(projections[0], servo_projections[i], pts_0.T, pts_i.T)
-        X3d = (X4d[:3] / X4d[3]).T
-
-
-        print(f"    frame {i:02d}: triangulated {len(X3d)} 3D points, "
-              f"depth range: {X3d[:, 2].min():.4f}..{X3d[:, 2].max():.4f}")
-
-        # Filter points with negative/zero depth (behind camera)
-        valid_depth = X3d[:, 2] > 0
-        X3d_valid  = X3d[valid_depth]
-        pts_i_valid = pts_i[valid_depth]
-        print(f"    frame {i:02d}: {valid_depth.sum()} / {len(X3d)} points have positive depth")
-
-        if len(X3d_valid) < 6:
-            projections[i] = projections[i - 1]
-            print(f"    frame {i:02d}: too few valid 3D points ({len(X3d_valid)}) "
-                  f"— copied from frame {i-1:02d}")
-            continue
-
-        ok, rvec, tvec, inliers = cv2.solvePnPRansac(
-            X3d_valid, pts_i_valid, K, None,
-            iterationsCount=1000, reprojectionError=2.0,
-        )
-        if not ok or inliers is None or len(inliers) < 6:
-            projections[i] = projections[i - 1]
-            print(f"    frame {i:02d}: PnP failed "
-                  f"({len(inliers) if inliers is not None else 0} inliers) "
-                  f"— copied from frame {i-1:02d}")
-            continue
-
-        R, _ = cv2.Rodrigues(rvec)
-        projections[i] = K @ np.hstack([R, tvec])
-        C_pnp = -R.T @ tvec.reshape(3)
-        print(f"    frame {i:02d}: PnP OK  ({len(inliers)} inliers)  "
-              f"camera centre ≈ {C_pnp.round(3)}")
-
-    return projections
-
-
-# --------------------------------------------------------------------------- #
-#  Decompose projection (utility)                                              #
-# --------------------------------------------------------------------------- #
-
-def _decompose_projection(P: np.ndarray, K: np.ndarray):
-    """Extract R, t from a projection matrix P = K[R|t]."""
-    Rt = np.linalg.inv(K) @ P
-    R  = Rt[:, :3]
-    t  = Rt[:, 3:4]
-    U, _, Vt = np.linalg.svd(R)
-    R = U @ Vt
-    if np.linalg.det(R) < 0:
-        R = -R
-        t = -t
-    return R, t
-
 
 # --------------------------------------------------------------------------- #
 #  Camera intrinsics                                                           #
@@ -208,31 +109,21 @@ def _decompose_projection(P: np.ndarray, K: np.ndarray):
 
 def _camera_intrinsics() -> np.ndarray:
     """
-    3×3 intrinsic matrix K for the OV2640 on the ESP32-CAM.
-    fx/fy in pixels; principal point at image centre.
-
-    OV2640 at UXGA (1600×1200): typical FOV ≈ 65–78° horizontal.
-    For 68° HFOV: fx = (W/2) / tan(HFOV/2) ≈ 800 / tan(34°) ≈ 1185 px
-    The original value of 600 gives HFOV ≈ 106° which is too wide for OV2640.
-    Replace fx with your calibrated value; 1185 is a better starting estimate.
+    returns the 3x3 intrinsic matrix for the camera, calculated using a loosely calibrated
+    fx value for the fov calculation. With 1185.0 the fov is around 60
     """
     w, h = config.IMAGE_WIDTH, config.IMAGE_HEIGHT
-    fx   = 1185.0  # ← updated estimate; replace with calibrated value
-    fy   = fx      # square pixels assumed
+    fx   = 1185.0  # determined by calculation of pixels against cube faces of known size
+    fy   = fx      # square pixels
     cx   = w / 2.0
     cy   = h / 2.0
     print(f"[pose] Using fx=fy={fx:.1f}, cx={cx}, cy={cy} "
-          f"(image {w}×{h})")
+          f"(image {w}x{h})")
     return np.array([
         [fx,  0, cx],
         [ 0, fy, cy],
         [ 0,  0,  1],
     ], dtype=np.float64)
-
-
-# Radial/tangential distortion coefficients [k1, k2, p1, p2, k3]
-# Zero until proper calibration is done.
-DIST_COEFFS = np.zeros(5, dtype=np.float64)
 
 
 # --------------------------------------------------------------------------- #
