@@ -59,11 +59,11 @@ def compute_camera_distance(theta: float) -> float | None:
 #  Public entry point                                                          #
 # --------------------------------------------------------------------------- #
 
-def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[np.ndarray]:
+def compute_projections(frames) -> list[np.ndarray]:
     """
-    Two modes:
-      - matches + keypoints provided → PnP from frame-0 anchor (accurate)
-      - neither provided             → synthesised from servo/IMU angles
+    Synthesises a 3x4 projection matrix P = K [R | t] for each frame
+    using the servo angle, IMU pitch, and camera distance stored in
+    each frame's CameraPose.
     """
     K = _camera_intrinsics()
     print(f"\n[pose] Intrinsics K:\n{K}\n")
@@ -75,7 +75,7 @@ def compute_projections(frames, matches=None, keypoints_per_frame=None) -> list[
     for frame in frames:
         pose  = frame.pose
         horiz = math.sqrt(max(pose.radius**2 - H**2, 0.0))
-        theta = math.atan2(H, horiz)
+        theta = math.radians(pose.imu_pitch_deg)
         servo_rad = math.radians(pose.servo_angle_deg)
 
         Cx = horiz * math.sin(servo_rad)
@@ -124,11 +124,6 @@ def _camera_intrinsics() -> np.ndarray:
         [ 0, fy, cy],
         [ 0,  0,  1],
     ], dtype=np.float64)
-
-
-# Radial/tangential distortion coefficients [k1, k2, p1, p2, k3]
-# Zero until proper calibration is done.
-DIST_COEFFS = np.zeros(5, dtype=np.float64)
 
 
 # --------------------------------------------------------------------------- #
